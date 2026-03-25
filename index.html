@@ -11,7 +11,7 @@
     <script src="https://cdnjs.cloudflare.com/ajax/libs/lodash.js/4.17.21/lodash.min.js"></script>
     <script>
     (function(){
-        var re=['useState','useEffect','useRef','useMemo','useCallback','useReducer','useContext','useLayoutEffect','createElement','createContext','Fragment','Children','isValidElement','forwardRef','memo','cloneElement','Component','PureComponent','createRef','lazy','Suspense','startTransition','useId','useSyncExternalStore'];
+        var re=['useState','useEffect','useRef','useMemo','useCallback','useReducer','useContext','useLayoutEffect','useImperativeHandle','useDebugValue','useDeferredValue','useTransition','createElement','createContext','Fragment','Children','isValidElement','forwardRef','memo','cloneElement','Component','PureComponent','createRef','lazy','Suspense','startTransition','useId','useSyncExternalStore','version'];
         var rc='var R=window.React;export default R;'+re.map(function(e){return'export var '+e+'=R.'+e}).join(';')+';';
         var rdc='var D=window.ReactDOM;export default D;export var createRoot=D.createRoot;export var render=D.render;export var createPortal=D.createPortal;export var flushSync=D.flushSync;';
         var ru=URL.createObjectURL(new Blob([rc],{type:'text/javascript'}));
@@ -119,8 +119,7 @@
             min-width: 80px;
         }
 
-        select, input[type="    l  min-w}x;
-    or-grord"] {
+        select, input[type="text"], input[type="password"] {
             padding: 8px 12px;
             border: 1px solid #ddd;
             border-radius: 4px;
@@ -128,7 +127,7 @@
             font-family: inherit;
         }
 
-        select:focus min-w}:focus {
+        select:focus, input:focus {
             outline: none;
             border-color: #00BCD4;
             box-shadow: 0 0 0 3px rgba(0, 188, 212, 0.1);
@@ -197,7 +196,7 @@
         .kpi-label {
             font-size: 12px;
             color: #999;
-                -transform: uppercase;
+            text-transform: uppercase;
             letter-spacing: 1px;
             margin-bottom: 8px;
         }
@@ -247,12 +246,12 @@
         table thead {
             background-color: #f5f5f5;
             position: sticky;
-             op: 0;
+            top: 0;
         }
 
         table th {
             padding: 12px;
-                -align: left;
+            text-align: left;
             font-weight: 600;
             color: #333;
             border-bottom: 2px solid #e0e0e0;
@@ -282,7 +281,7 @@
             width: 20px;
             height: 20px;
             border: 3px solid #f3f3f3;
-            border- op: 3px solid #00BCD4;
+            border-top: 3px solid #00BCD4;
             border-radius: 50%;
             animation: spin 1s linear infinite;
             margin: 0 8px;
@@ -294,7 +293,7 @@
         }
 
         .empty-state {
-                -align: center;
+            text-align: center;
             padding: 60px 20px;
             background: white;
             border-radius: 8px;
@@ -310,7 +309,7 @@
             border: 2px dashed #00BCD4;
             border-radius: 8px;
             padding: 40px;
-                -align: center;
+            text-align: center;
             background-color: #f8feff;
             margin: 20px 0;
             cursor: pointer;
@@ -350,12 +349,12 @@
             max-height: 0;
             overflow: hidden;
             transition: max-height 0.3s ease;
-            margin- op: 0;
+            margin-top: 0;
         }
 
         .collapsible.open .collapsible-content {
             max-height: 2000px;
-            margin- op: 12px;
+            margin-top: 12px;
         }
 
         .collapsible-toggle {
@@ -392,8 +391,8 @@
             font-size: 13px;
         }
 
-        .form-group in-w},
-        .form-group     area {
+        .form-group input,
+        .form-group textarea {
             width: 100%;
             padding: 10px 12px;
             border: 1px solid #ddd;
@@ -402,29 +401,29 @@
             font-size: 13px;
         }
 
-        .form-group     area {
+        .form-group textarea {
             min-height: 100px;
             resize: vertical;
         }
 
-        .form-group in-w}:focus 
-        .form-group     area:focus {
+        .form-group input:focus,
+        .form-group textarea:focus {
             outline: none;
             border-color: #00BCD4;
             box-shadow: 0 0 0 3px rgba(0, 188, 212, 0.1);
         }
 
-        .help-     {
+        .help-text {
             font-size: 12px;
             color: #999;
-            margin- op: 6px;
+            margin-top: 6px;
         }
 
         .file-list {
             background-color: #f5f5f5;
             border-radius: 4px;
             padding: 12px;
-            margin- op: 8px;
+            margin-top: 8px;
         }
 
         .file-item {
@@ -538,7 +537,7 @@
 <body>
     <div id="root"></div>
 
-    <script type="    /plain" id="app-script">
+    <script type="text/plain" id="app-script">
         const { useState, useEffect, useMemo, useCallback } = React;
         const {
             BarChart, Bar, LineChart, Line, PieChart, Pie, Cell,
@@ -675,9 +674,9 @@
                     const salariesData = await fetchFilesFromGDrive(salaryFolderId || folderId, 'salary');
                     setWorkLogs(workLogsData);
                     setSalaryData(salariesData);
-                    setMessage({ type: 'success',     : '数据加载成功' });
+                    setMessage({ type: 'success', text: '数据加载成功' });
                 } catch (error) {
-                    setMessage({ type: 'error',     : `加载失败: ${error.message}` });
+                    setMessage({ type: 'error', text: `加载失败: ${error.message}` });
                 }
                 setLoading(false);
             }, [apiKey, folderId, salaryFolderId]);
@@ -689,7 +688,7 @@
                     { headers: { 'Accept': 'application/json' } }
                 );
 
-                if (!response.ok) throw new Error(`Google Drive API error: ${response.statusT   }`);
+                if (!response.ok) throw new Error(`Google Drive API error: ${response.statusText}`);
 
                 const result = await response.json();
                 const files = result.files || [];
@@ -724,12 +723,12 @@
                 localStorage.setItem('gdrive_api_key', apiKey);
                 localStorage.setItem('gdrive_folder_id', folderId);
                 localStorage.setItem('gdrive_salary_folder_id', salaryFolderId);
-                setMessage({ type: 'success',     : '设置已保存' });
+                setMessage({ type: 'success', text: '设置已保存' });
             };
 
             const handleTestConnection = async () => {
                 if (!apiKey || !folderId) {
-                    setMessage({ type: 'error',     : '请填写 API Key 和文件夹 ID' });
+                    setMessage({ type: 'error', text: '请填写 API Key 和文件夹 ID' });
                     return;
                 }
 
@@ -742,12 +741,12 @@
                     );
 
                     if (response.ok) {
-                        setMessage({ type: 'success',     : '连接成功！可以加载数据' });
+                        setMessage({ type: 'success', text: '连接成功！可以加载数据' });
                     } else {
-                        setMessage({ type: 'error',     : '连接失败，请检查 API Key 和文件夹 ID' });
+                        setMessage({ type: 'error', text: '连接失败，请检查 API Key 和文件夹 ID' });
                     }
                 } catch (error) {
-                    setMessage({ type: 'error',     : `连接测试失败: ${error.message}` });
+                    setMessage({ type: 'error', text: `连接测试失败: ${error.message}` });
                 }
                 setTestingConnection(false);
             };
@@ -758,10 +757,10 @@
                     .then(results => {
                         const allLogs = results.flat();
                         setWorkLogs([...workLogs, ...allLogs]);
-                        setMessage({ type: 'success',     : `成功导入 ${allLogs.length} 条工作记录` });
+                        setMessage({ type: 'success', text: `成功导入 ${allLogs.length} 条工作记录` });
                     })
                     .catch(error => {
-                        setMessage({ type: 'error',     : `导入失败: ${error.message}` });
+                        setMessage({ type: 'error', text: `导入失败: ${error.message}` });
                     });
             };
 
@@ -771,10 +770,10 @@
                     .then(results => {
                         const allSalaries = results.flat();
                         setSalaryData([...salaryData, ...allSalaries]);
-                        setMessage({ type: 'success',     : `成功导入 ${allSalaries.length} 条薪资记录` });
+                        setMessage({ type: 'success', text: `成功导入 ${allSalaries.length} 条薪资记录` });
                     })
                     .catch(error => {
-                        setMessage({ type: 'error',     : `导入失败: ${error.message}` });
+                        setMessage({ type: 'error', text: `导入失败: ${error.message}` });
                     });
             };
 
@@ -1024,7 +1023,7 @@
                     <div className="container">
                         {message && (
                             <div className={`alert alert-${message.type}`}>
-                                {message.t   }
+                                {message.text}
                             </div>
                         )}
 
@@ -1745,7 +1744,7 @@
                         {filteredLogs.length === 0 && activeTab !== 'settings' && (
                             <div className="empty-state">
                                 <h3>暫無數據</h3>
-                                <p>請先在「設定」頁籤酊p�� Google Drive 或上傳 Excel 檔案</p>
+                                <p>請先在「設定」頁籤配置 Google Drive 或上傳 Excel 檔案</p>
                             </div>
                         )}
                     </div>
