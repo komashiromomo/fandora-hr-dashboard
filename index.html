@@ -681,22 +681,41 @@
                 setLoading(false);
             }, [apiKey, folderId, salaryFolderId]);
 
+            const listFolderFiles = async (fId) => {
+                const allFiles = [];
+                let pageToken = '';
+                do {
+                    const q = encodeURIComponent(`'${fId}' in parents and trashed=false`);
+                    let url = `https://www.googleapis.com/drive/v3/files?q=${q}&key=${apiKey}&fields=nextPageToken,files(id,name,mimeType,modifiedTime)&pageSize=100`;
+                    if (pageToken) url += `&pageToken=${pageToken}`;
+                    const resp = await fetch(url, { headers: { 'Accept': 'application/json' } });
+                    if (!resp.ok) throw new Error(`Google Drive API error: ${resp.statusText}`);
+                    const json = await resp.json();
+                    allFiles.push(...(json.files || []));
+                    pageToken = json.nextPageToken || '';
+                } while (pageToken);
+                return allFiles;
+            };
+
+            const collectXlsxFiles = async (fId, depth = 0) => {
+                if (depth > 5) return [];
+                const items = await listFolderFiles(fId);
+                let xlsxFiles = items.filter(f => f.name.toLowerCase().endsWith('.xlsx'));
+                const subFolders = items.filter(f => f.mimeType === 'application/vnd.google-apps.folder');
+                for (const folder of subFolders) {
+                    const subFiles = await collectXlsxFiles(folder.id, depth + 1);
+                    xlsxFiles = xlsxFiles.concat(subFiles);
+                }
+                return xlsxFiles;
+            };
+
             const fetchFilesFromGDrive = async (folderIdToUse, fileType) => {
-                const query = encodeURIComponent(`'${folderIdToUse}' in parents and trashed=false`);
-                const response = await fetch(
-                    `https://www.googleapis.com/drive/v3/files?q=${query}&key=${apiKey}&fields=files(id,name,mimeType,modifiedTime)`,
-                    { headers: { 'Accept': 'application/json' } }
-                );
-
-                if (!response.ok) throw new Error(`Google Drive API error: ${response.statusText}`);
-
-                const result = await response.json();
-                const files = result.files || [];
+                setMessage({ type: 'info', text: '正在掃描資料夾結構，請稍候...' });
+                const files = await collectXlsxFiles(folderIdToUse);
+                setMessage({ type: 'info', text: `找到 ${files.length} 個 Excel 檔案，正在載入...` });
                 const data = [];
 
                 for (const file of files) {
-                    if (!file.name.includes('.xlsx')) continue;
-
                     try {
                         const fileResponse = await fetch(
                             `https://www.googleapis.com/drive/v3/files/${file.id}?alt=media&key=${apiKey}`
