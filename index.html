@@ -686,7 +686,7 @@
                 let pageToken = '';
                 do {
                     const q = encodeURIComponent(`'${fId}' in parents and trashed=false`);
-                    let url = `https://www.googleapis.com/drive/v3/files?q=${q}&key=${apiKey}&fields=nextPageToken,files(id,name,mimeType,modifiedTime)&pageSize=100`;
+                    let url = `https://www.googleapis.com/drive/v3/files?q=${q}&key=${apiKey}&fields=nextPageToken,files(id,name,mimeType,modifiedTime)&pageSize=100&supportsAllDrives=true&includeItemsFromAllDrives=true`;
                     if (pageToken) url += `&pageToken=${pageToken}`;
                     const resp = await fetch(url, { headers: { 'Accept': 'application/json' } });
                     if (!resp.ok) throw new Error(`Google Drive API error: ${resp.statusText}`);
@@ -697,37 +697,51 @@
                 return allFiles;
             };
 
-            const collectXlsxFiles = async (fId, depth = 0) => {
+            const collectSpreadsheetFiles = async (fId, depth = 0) => {
                 if (depth > 5) return [];
                 const items = await listFolderFiles(fId);
-                let xlsxFiles = items.filter(f => f.name.toLowerCase().endsWith('.xlsx'));
+                let spreadsheets = items.filter(f =>
+                    f.name.toLowerCase().endsWith('.xlsx') ||
+                    f.mimeType === 'application/vnd.google-apps.spreadsheet'
+                );
                 const subFolders = items.filter(f => f.mimeType === 'application/vnd.google-apps.folder');
                 for (const folder of subFolders) {
-                    const subFiles = await collectXlsxFiles(folder.id, depth + 1);
-                    xlsxFiles = xlsxFiles.concat(subFiles);
+                    const subFiles = await collectSpreadsheetFiles(folder.id, depth + 1);
+                    spreadsheets = spreadsheets.concat(subFiles);
                 }
-                return xlsxFiles;
+                return spreadsheets;
             };
 
             const fetchFilesFromGDrive = async (folderIdToUse, fileType) => {
                 setMessage({ type: 'info', text: '正在掃描資料夾結構，請稍候...' });
-                const files = await collectXlsxFiles(folderIdToUse);
-                setMessage({ type: 'info', text: `找到 ${files.length} 個 Excel 檔案，正在載入...` });
+                const files = await collectSpreadsheetFiles(folderIdToUse);
+                setMessage({ type: 'info', text: `找到 ${files.length} 個試算表檔案，正在載入...` });
                 const data = [];
 
                 for (const file of files) {
                     try {
-                        const fileResponse = await fetch(
-                            `https://www.googleapis.com/drive/v3/files/${file.id}?alt=media&key=${apiKey}`
-                        );
+                        let fileResponse;
+                        if (file.mimeType === 'application/vnd.google-apps.spreadsheet') {
+                            fileResponse = await fetch(
+                                `https://www.googleapis.com/drive/v3/files/${file.id}/export?mimeType=application/vnd.openxmlformats-officedocument.spreadsheetml.sheet&key=${apiKey}`
+                            );
+                        } else {
+                            fileResponse = await fetch(
+                                `https://www.googleapis.com/drive/v3/files/${file.id}?alt=media&key=${apiKey}&supportsAllDrives=true`
+                            );
+                        }
+                        if (!fileResponse.ok) {
+                            console.error(`Failed to download ${file.name}: ${fileResponse.status}`);
+                            continue;
+                        }
                         const arrayBuffer = await fileResponse.arrayBuffer();
 
                         if (fileType === 'work') {
-                            const mockFile = new File([arrayBuffer], file.name);
+                            const mockFile = new File([arrayBuffer], file.name + '.xlsx');
                             const records = await parseWorkLogExcel(mockFile, file.name);
                             data.push(...records);
                         } else if (fileType === 'salary') {
-                            const mockFile = new File([arrayBuffer], file.name);
+                            const mockFile = new File([arrayBuffer], file.name + '.xlsx');
                             const records = await parseSalaryExcel(mockFile);
                             data.push(...records);
                         }
@@ -755,14 +769,17 @@
                 try {
                     const query = encodeURIComponent(`'${folderId}' in parents and trashed=false`);
                     const response = await fetch(
-                        `https://www.googleapis.com/drive/v3/files?q=${query}&key=${apiKey}&fields=files(id,name)&pageSize=1`,
+                        `https://www.googleapis.com/drive/v3/files?q=${query}&key=${apiKey}&fields=files(id,name)&pageSize=1&supportsAllDrives=true&includeItemsFromAllDrives=true`,
                         { headers: { 'Accept': 'application/json' } }
                     );
 
                     if (response.ok) {
-                        setMessage({ type: 'success', text: '连接成功！可以加载数据' });
+                        const result = await response.json();
+                        const count = (result.files || []).length;
+                        setMessage({ type: 'success', text: `連接成功！資料夾中找到 ${count} 個項目，可以載入數據` });
                     } else {
-                        setMessage({ type: 'error', text: '连接失败，请检查 API Key 和文件夹 ID' });
+                        const err = await response.json().catch(() => ({}));
+                        setMessage({ type: 'error', text: `連接失敗 (${response.status}): ${err.error?.message || '請檢查 API Key 和資料夾 ID'}` });
                     }
                 } catch (error) {
                     setMessage({ type: 'error', text: `连接测试失败: ${error.message}` });
