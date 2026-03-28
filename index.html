@@ -549,26 +549,91 @@
                         '#98D8C8', '#F7DC6F', '#BB8FCE', '#85C1E2', '#F8B88B'];
 
         // Excel parsing utilities
+
+        // Department mapping for employees (can be extended)
+        const EMPLOYEE_DEPT_MAP = {
+            '小麥': '管理部', '小智': '管理部', '妮佛': '管理部',
+            '阿溫': '設計部', '茹津': '設計部', '敏佳': '設計部',
+            'Janet': '行銷部', 'Kate': '行銷部', 'Kerry': '行銷部',
+            'PAN': '技術部', 'Stacy': '技術部'
+        };
+
+        // Convert Excel serial date number to YYYY-MM-DD string
+        const excelDateToString = (serial) => {
+            if (typeof serial === 'string') {
+                // Already a date string, try to parse it
+                const m = serial.match(/(\d{4})[\/-](\d{1,2})[\/-](\d{1,2})/);
+                if (m) return `${m[1]}-${m[2].padStart(2,'0')}-${m[3].padStart(2,'0')}`;
+                return serial;
+            }
+            if (typeof serial !== 'number' || serial < 1) return null;
+            // Excel epoch: 1900-01-01 = 1, but JS Date epoch is 1970-01-01
+            // Excel has a leap year bug (1900 is not a leap year but Excel thinks it is)
+            const utcDays = Math.floor(serial) - 25569;
+            const d = new Date(utcDays * 86400 * 1000);
+            const yyyy = d.getUTCFullYear();
+            const mm = String(d.getUTCMonth() + 1).padStart(2, '0');
+            const dd = String(d.getUTCDate()).padStart(2, '0');
+            return `${yyyy}-${mm}-${dd}`;
+        };
+
+        // Extract employee name from filename like "工作日誌_2026年_茹津"
+        const extractEmployeeName = (filename) => {
+            const m = filename.match(/工作日誌_\d{4}年_(.+?)(?:\.xlsx?)?$/i);
+            if (m) return m[1].trim();
+            // Fallback: try last segment after underscore
+            const parts = filename.replace(/\.xlsx?$/i, '').split('_');
+            return parts.length > 1 ? parts[parts.length - 1].trim() : null;
+        };
+
+        // Extract year from filename like "工作日誌_2026年_茹津"
+        const extractYearFromFilename = (filename) => {
+            const m = filename.match(/(\d{4})年/);
+            return m ? parseInt(m[1]) : new Date().getFullYear();
+        };
+
         const parseWorkLogExcel = (file, filename) => {
             return new Promise((resolve, reject) => {
                 const reader = new FileReader();
                 reader.onload = (e) => {
                     try {
                         const data = new Uint8Array(e.target.result);
-                        const workbook = XLSX.read(data, { type: 'array' });
-                        const sheetName = '明細總表';
-                        if (!workbook.SheetNames.includes(sheetName)) {
-                            reject(new Error(`Sheet '${sheetName}' not found`));
-                            return;
+                        const workbook = XLSX.read(data, { type: 'array', cellDates: false });
+
+                        const employeeName = extractEmployeeName(filename);
+                        const fileYear = extractYearFromFilename(filename);
+                        const dept = (employeeName && EMPLOYEE_DEPT_MAP[employeeName]) || '未分類';
+
+                        const allRecords = [];
+
+                        // Iterate through all month sheets (1月, 2月, ... 12月)
+                        for (const sheetName of workbook.SheetNames) {
+                            const monthMatch = sheetName.match(/^(\d{1,2})月$/);
+                            if (!monthMatch) continue; // skip non-month sheets
+
+                            const monthNum = parseInt(monthMatch[1]);
+                            const monthStr = `${fileYear}-${String(monthNum).padStart(2, '0')}`;
+
+                            const worksheet = workbook.Sheets[sheetName];
+                            const rows = XLSX.utils.sheet_to_json(worksheet, { header: 1, defval: '' });
+
+                            const records = parseWorkLogRows(rows, employeeName, dept, monthStr, fileYear, monthNum);
+                            allRecords.push(...records);
                         }
-                        const worksheet = workbook.Sheets[sheetName];
-                        const rows = XLSX.utils.sheet_to_json(worksheet, { header: 1 });
 
-                        const monthMatch = filename.match(/(\d{4})年(\d{2})月/);
-                        const month = monthMatch ? `${monthMatch[1]}-${monthMatch[2]}` : null;
+                        // If no month sheets found, try the first sheet as fallback
+                        if (allRecords.length === 0 && workbook.SheetNames.length > 0) {
+                            const firstSheet = workbook.Sheets[workbook.SheetNames[0]];
+                            const rows = XLSX.utils.sheet_to_json(firstSheet, { header: 1, defval: '' });
+                            const monthMatch = filename.match(/(\d{4})年(\d{1,2})月/);
+                            const monthStr = monthMatch
+                                ? `${monthMatch[1]}-${String(parseInt(monthMatch[2])).padStart(2, '0')}`
+                                : `${fileYear}-01`;
+                            const records = parseWorkLogRows(rows, employeeName, dept, monthStr, fileYear, null);
+                            allRecords.push(...records);
+                        }
 
-                        const records = parseWorkLogRows(rows, month);
-                        resolve(records);
+                        resolve(allRecords);
                     } catch (error) {
                         reject(error);
                     }
@@ -577,44 +642,88 @@
             });
         };
 
-        const parseWorkLogRows = (rows, defaultMonth) => {
-            if (rows.length < 1) return [];
+        // Actual columns: 日期(0), 星期(1), 授權IP(2), 工作項目(3), 工作開始時間(4), 工作結束時間(5), 實際時數(6)
+        const parseWorkLogRows = (rows, employeeName, dept, defaultMonth, fileYear, sheetMonth) => {
+            if (rows.length < 2) return [];
 
-            const headers = rows[0];
-            const hasHours = headers.includes('實際時數');
+            // Find header row (look for '日期' or '工作項目' in first few rows)
+            let headerIdx = 0;
+            for (let i = 0; i < Math.min(5, rows.length); i++) {
+                const row = rows[i];
+                if (row && row.some(cell => {
+                    const s = String(cell).trim();
+                    return s === '日期' || s === '工作項目' || s === '實際時數';
+                })) {
+                    headerIdx = i;
+                    break;
+                }
+            }
+
+            const headers = rows[headerIdx] || [];
+            // Build column index map
+            const colIdx = {};
+            headers.forEach((h, i) => {
+                const key = String(h).trim();
+                if (key === '日期') colIdx.date = i;
+                if (key === '星期') colIdx.weekday = i;
+                if (key === '工作項目') colIdx.task = i;
+                if (key === '工作開始時間') colIdx.startTime = i;
+                if (key === '工作結束時間') colIdx.endTime = i;
+                if (key === '實際時數') colIdx.hours = i;
+            });
+
+            // Fallback to positional if headers not found
+            if (colIdx.date === undefined) colIdx.date = 0;
+            if (colIdx.task === undefined) colIdx.task = 3;
+            if (colIdx.hours === undefined) colIdx.hours = 6;
 
             const records = [];
-            let currentName = null;
-            let currentDept = null;
-            let currentDate = null;
 
-            for (let i = 1; i < rows.length; i++) {
+            for (let i = headerIdx + 1; i < rows.length; i++) {
                 const row = rows[i];
                 if (!row || row.length === 0) continue;
 
-                if (row[0]) currentName = row[0];
-                if (row[1] && row[1] !== '部門') currentDept = row[1];
-                if (row[2]) currentDate = row[2];
+                // Skip template/example rows
+                const firstCell = String(row[0] || '').trim();
+                if (firstCell === '範例1' || firstCell === '範例2' || firstCell === '範例') continue;
+                if (firstCell === '日期') continue; // skip duplicate header rows
 
-                const name = currentName;
-                const dept = currentDept;
-                const date = currentDate;
-                const task = row[4] || (row[8] ? row[8] : '');
-                const hours = parseFloat(row[headers.indexOf('實際時數')] || 0) || 0;
+                // Parse date
+                let dateRaw = row[colIdx.date];
+                let dateStr = null;
 
-                if (name && date && task && hours > 0) {
-                    const dateMatch = date.toString().match(/(\d{4})[\/-](\d{2})/);
-                    const month = dateMatch ? `${dateMatch[1]}-${dateMatch[2]}` : defaultMonth;
-
-                    records.push({
-                        name,
-                        dept: dept || '未分類',
-                        date,
-                        task,
-                        hours,
-                        month: month || defaultMonth || '2026-01'
-                    });
+                if (dateRaw !== '' && dateRaw !== null && dateRaw !== undefined) {
+                    if (typeof dateRaw === 'number' && dateRaw > 40000) {
+                        // Excel serial date
+                        dateStr = excelDateToString(dateRaw);
+                    } else if (typeof dateRaw === 'string') {
+                        dateStr = excelDateToString(dateRaw);
+                    }
                 }
+
+                if (!dateStr) continue; // skip rows without valid date
+
+                // Parse task
+                const task = String(row[colIdx.task] || '').trim();
+                if (!task) continue; // skip rows without work item
+
+                // Parse hours
+                const hoursRaw = row[colIdx.hours];
+                const hours = parseFloat(hoursRaw) || 0;
+                if (hours <= 0) continue; // skip zero-hour rows
+
+                // Derive month from date or use default
+                const dateMatch = dateStr.match(/^(\d{4})-(\d{2})/);
+                const month = dateMatch ? `${dateMatch[1]}-${dateMatch[2]}` : defaultMonth;
+
+                records.push({
+                    name: employeeName || '未知',
+                    dept: dept || '未分類',
+                    date: dateStr,
+                    task: task,
+                    hours: hours,
+                    month: month || defaultMonth || `${fileYear}-01`
+                });
             }
 
             return records;
