@@ -550,12 +550,23 @@
 
         // Excel parsing utilities
 
-        // Department mapping for employees (can be extended)
+        // Department mapping for employees — nicknames (個人逐月) + real names (全體統整)
         const EMPLOYEE_DEPT_MAP = {
+            // Nicknames used in individual monthly files
             '小麥': '管理部', '小智': '管理部', '妮佛': '管理部',
             '阿溫': '設計部', '茹津': '設計部', '敏佳': '設計部',
             'Janet': '行銷部', 'Kate': '行銷部', 'Kerry': '行銷部',
-            'PAN': '技術部', 'Stacy': '技術部'
+            'PAN': '技術部', 'Stacy': '技術部',
+            // Real names used in all-staff monthly summary files
+            '余凱紓': '管理部', '李宜臻': '行銷部', '潘美怡': '技術部',
+            '許茹津': '設計部', '劉蕙慈': '設計部', '陳姿羽': '行銷部',
+            '侯渝琪': '設計部', '吳佳香': '設計部', '陳敏佳': '設計部',
+            '林宜萱': '行銷部', '陳敬文': '技術部'
+        };
+
+        // Detect if a filename is the all-staff monthly summary format
+        const isAllStaffFile = (filename) => {
+            return /Fandora工作日誌_\d{4}年\d{1,2}月/i.test(filename);
         };
 
         // Convert Excel serial date number to YYYY-MM-DD string
@@ -577,19 +588,78 @@
             return `${yyyy}-${mm}-${dd}`;
         };
 
-        // Extract employee name from filename like "工作日誌_2026年_茹津"
+        // Extract employee name from individual filename like "工作日誌_2026年_茹津"
+        // Returns null for all-staff files (employee names come from column headers)
         const extractEmployeeName = (filename) => {
+            // All-staff summary files have no single employee — return null
+            if (isAllStaffFile(filename)) return null;
             const m = filename.match(/工作日誌_\d{4}年_(.+?)(?:\.xlsx?)?$/i);
             if (m) return m[1].trim();
             // Fallback: try last segment after underscore
             const parts = filename.replace(/\.xlsx?$/i, '').split('_');
-            return parts.length > 1 ? parts[parts.length - 1].trim() : null;
+            const last = parts.length > 1 ? parts[parts.length - 1].trim() : null;
+            // Guard: if fallback looks like a month (e.g. "01月"), return null
+            if (last && /^\d{1,2}月$/.test(last)) return null;
+            return last;
         };
 
         // Extract year from filename like "工作日誌_2026年_茹津"
         const extractYearFromFilename = (filename) => {
             const m = filename.match(/(\d{4})年/);
             return m ? parseInt(m[1]) : new Date().getFullYear();
+        };
+
+        // Parse all-staff cross-tab format: rows = tasks, columns = employees, cells = hours
+        // Sheet name like "2026_01"; first column header = "工作內容說明"
+        const parseAllStaffCrossTab = (workbook, filename) => {
+            const fileYear = extractYearFromFilename(filename);
+            const allRecords = [];
+
+            for (const sheetName of workbook.SheetNames) {
+                // Match sheet names like "2026_01" or month-based sheets
+                const ymMatch = sheetName.match(/^(\d{4})[_\-](\d{1,2})$/);
+                if (!ymMatch) continue;
+
+                const year = parseInt(ymMatch[1]);
+                const monthNum = parseInt(ymMatch[2]);
+                const monthStr = `${year}-${String(monthNum).padStart(2, '0')}`;
+
+                const worksheet = workbook.Sheets[sheetName];
+                const rows = XLSX.utils.sheet_to_json(worksheet, { header: 1, defval: '' });
+                if (rows.length < 2) continue;
+
+                // First row is header: [工作內容說明, 員工A, 員工B, ...]
+                const headers = rows[0].map(h => String(h).trim());
+                // Verify this is cross-tab format
+                if (headers[0] !== '工作內容說明') continue;
+
+                const employeeNames = headers.slice(1).filter(n => n && n !== '');
+
+                for (let i = 1; i < rows.length; i++) {
+                    const row = rows[i];
+                    const task = String(row[0] || '').trim();
+                    if (!task) continue;
+                    // Skip total/summary rows
+                    if (task === '合計' || task === '總計' || task === 'Total') continue;
+
+                    for (let j = 0; j < employeeNames.length; j++) {
+                        const empName = employeeNames[j];
+                        const hours = parseFloat(row[j + 1]) || 0;
+                        if (hours <= 0) continue;
+
+                        const dept = EMPLOYEE_DEPT_MAP[empName] || '未分類';
+                        allRecords.push({
+                            name: empName,
+                            dept: dept,
+                            date: `${year}-${String(monthNum).padStart(2, '0')}-01`,
+                            task: task,
+                            hours: hours,
+                            month: monthStr
+                        });
+                    }
+                }
+            }
+            return allRecords;
         };
 
         const parseWorkLogExcel = (file, filename) => {
@@ -600,6 +670,16 @@
                         const data = new Uint8Array(e.target.result);
                         const workbook = XLSX.read(data, { type: 'array', cellDates: false });
 
+                        // --- FORMAT DETECTION ---
+                        // All-staff cross-tab: filename like "Fandora工作日誌_2026年01月"
+                        // Also double-check by looking for sheet names like "2026_01"
+                        if (isAllStaffFile(filename)) {
+                            const records = parseAllStaffCrossTab(workbook, filename);
+                            resolve(records);
+                            return;
+                        }
+
+                        // --- Individual employee format ---
                         const employeeName = extractEmployeeName(filename);
                         const fileYear = extractYearFromFilename(filename);
                         const dept = (employeeName && EMPLOYEE_DEPT_MAP[employeeName]) || '未分類';
@@ -622,9 +702,19 @@
                         }
 
                         // If no month sheets found, try the first sheet as fallback
+                        // But only if this is NOT an all-staff file (already handled above)
                         if (allRecords.length === 0 && workbook.SheetNames.length > 0) {
+                            // Secondary cross-tab detection: check first sheet header
                             const firstSheet = workbook.Sheets[workbook.SheetNames[0]];
-                            const rows = XLSX.utils.sheet_to_json(firstSheet, { header: 1, defval: '' });
+                            const firstRows = XLSX.utils.sheet_to_json(firstSheet, { header: 1, defval: '' });
+                            if (firstRows.length > 0 && String(firstRows[0][0]).trim() === '工作內容說明') {
+                                // This is actually a cross-tab file with unexpected filename
+                                const records = parseAllStaffCrossTab(workbook, filename);
+                                resolve(records);
+                                return;
+                            }
+
+                            const rows = firstRows;
                             const monthMatch = filename.match(/(\d{4})年(\d{1,2})月/);
                             const monthStr = monthMatch
                                 ? `${monthMatch[1]}-${String(parseInt(monthMatch[2])).padStart(2, '0')}`
