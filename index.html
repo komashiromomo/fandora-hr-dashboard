@@ -550,18 +550,18 @@
 
         // Excel parsing utilities
 
-        // Department mapping for employees — nicknames (個人逐月) + real names (全體統整)
+        // Department mapping — real names from 明細總表 + nicknames from individual files
         const EMPLOYEE_DEPT_MAP = {
-            // Nicknames used in individual monthly files
-            '小麥': '管理部', '小智': '管理部', '妮佛': '管理部',
-            '阿溫': '設計部', '茹津': '設計部', '敏佳': '設計部',
-            'Janet': '行銷部', 'Kate': '行銷部', 'Kerry': '行銷部',
-            'PAN': '技術部', 'Stacy': '技術部',
-            // Real names used in all-staff monthly summary files
-            '余凱紓': '管理部', '李宜臻': '行銷部', '潘美怡': '技術部',
-            '許茹津': '設計部', '劉蕙慈': '設計部', '陳姿羽': '行銷部',
-            '侯渝琪': '設計部', '吳佳香': '設計部', '陳敏佳': '設計部',
-            '林宜萱': '行銷部', '陳敬文': '技術部'
+            // Real names (from 全體當月統整 → 明細總表)
+            '余凱紓': '後勤部', '李宜臻': '企劃部', '潘美怡': '後勤部',
+            '許茹津': '商品開發部', '劉蕙慈': '企劃部', '陳姿羽': '管理部',
+            '侯渝琪': '商品商發部', '吳佳香': '銷售部', '陳敏佳': '企劃部',
+            '林宜萱': '後勤部', '陳敬文': '後勤部',
+            // Nicknames (from 員工個人逐月紀錄) — best-effort mapping
+            '小麥': '後勤部', '小智': '管理部', '妮佛': '管理部',
+            '阿溫': '商品商發部', '茹津': '商品開發部', '敏佳': '企劃部',
+            'Janet': '企劃部', 'Kate': '企劃部', 'Kerry': '商品開發部',
+            'PAN': '後勤部', 'Stacy': '銷售部'
         };
 
         // Detect if a filename is the all-staff monthly summary format
@@ -609,48 +609,48 @@
             return m ? parseInt(m[1]) : new Date().getFullYear();
         };
 
-        // Parse all-staff cross-tab format: rows = tasks, columns = employees, cells = hours
-        // Sheet name like "2026_01"; first column header = "工作內容說明"
-        const parseAllStaffCrossTab = (workbook, filename) => {
+        // Parse all-staff file — prefer 明細總表 sheet (detailed rows), fallback to cross-tab
+        const parseAllStaffFile = (workbook, filename) => {
             const fileYear = extractYearFromFilename(filename);
-            const allRecords = [];
+            const monthMatch = filename.match(/(\d{4})年(\d{1,2})月/);
+            const fileMonthNum = monthMatch ? parseInt(monthMatch[2]) : 1;
+            const defaultMonthStr = `${fileYear}-${String(fileMonthNum).padStart(2, '0')}`;
 
+            // --- Strategy 1: Parse 明細總表 (detailed log rows) ---
+            if (workbook.SheetNames.includes('明細總表')) {
+                const ws = workbook.Sheets['明細總表'];
+                const rows = XLSX.utils.sheet_to_json(ws, { header: 1, defval: '' });
+                if (rows.length > 1) {
+                    const records = parseDetailSheet(rows, fileYear, defaultMonthStr);
+                    if (records.length > 0) return records;
+                }
+            }
+
+            // --- Strategy 2: Parse cross-tab sheet (YYYY_MM) ---
+            const allRecords = [];
             for (const sheetName of workbook.SheetNames) {
-                // Match sheet names like "2026_01" or month-based sheets
                 const ymMatch = sheetName.match(/^(\d{4})[_\-](\d{1,2})$/);
                 if (!ymMatch) continue;
-
                 const year = parseInt(ymMatch[1]);
                 const monthNum = parseInt(ymMatch[2]);
                 const monthStr = `${year}-${String(monthNum).padStart(2, '0')}`;
-
-                const worksheet = workbook.Sheets[sheetName];
-                const rows = XLSX.utils.sheet_to_json(worksheet, { header: 1, defval: '' });
+                const ws = workbook.Sheets[sheetName];
+                const rows = XLSX.utils.sheet_to_json(ws, { header: 1, defval: '' });
                 if (rows.length < 2) continue;
-
-                // First row is header: [工作內容說明, 員工A, 員工B, ...]
                 const headers = rows[0].map(h => String(h).trim());
-                // Verify this is cross-tab format
                 if (headers[0] !== '工作內容說明') continue;
-
                 const employeeNames = headers.slice(1).filter(n => n && n !== '');
-
                 for (let i = 1; i < rows.length; i++) {
                     const row = rows[i];
                     const task = String(row[0] || '').trim();
-                    if (!task) continue;
-                    // Skip total/summary rows
-                    if (task === '合計' || task === '總計' || task === 'Total') continue;
-
+                    if (!task || task === '合計' || task === '總計' || task === 'Total') continue;
                     for (let j = 0; j < employeeNames.length; j++) {
                         const empName = employeeNames[j];
                         const hours = parseFloat(row[j + 1]) || 0;
                         if (hours <= 0) continue;
-
-                        const dept = EMPLOYEE_DEPT_MAP[empName] || '未分類';
                         allRecords.push({
                             name: empName,
-                            dept: dept,
+                            dept: EMPLOYEE_DEPT_MAP[empName] || '未分類',
                             date: `${year}-${String(monthNum).padStart(2, '0')}-01`,
                             task: task,
                             hours: hours,
@@ -662,6 +662,103 @@
             return allRecords;
         };
 
+        // Parse 明細總表 format:
+        // 員工姓名(A), 部門(B), 日期(C), 應上下班時段(D), 工作開始時間(E),
+        // 工作結束時間(F), 總工作時段(G), 工作內容說明(H), 實際時數(I)
+        const parseDetailSheet = (rows, fileYear, defaultMonthStr) => {
+            // Find header row
+            let headerIdx = -1;
+            for (let i = 0; i < Math.min(5, rows.length); i++) {
+                const row = rows[i];
+                if (row && row.some(c => String(c).trim() === '員工姓名') &&
+                    row.some(c => String(c).trim() === '工作內容說明')) {
+                    headerIdx = i;
+                    break;
+                }
+            }
+            if (headerIdx < 0) return [];
+
+            const headers = rows[headerIdx].map(h => String(h).trim());
+            const col = {};
+            headers.forEach((h, i) => {
+                if (h === '員工姓名' && col.name === undefined) col.name = i;
+                if (h === '部門') col.dept = i;
+                if (h === '日期') col.date = i;
+                if (h === '工作內容說明' && col.task === undefined) col.task = i;
+                if (h === '實際時數' && col.hours === undefined) col.hours = i;
+            });
+
+            if (col.task === undefined || col.hours === undefined) return [];
+
+            const records = [];
+            let lastEmployee = '', lastDept = '', lastDateStr = '';
+
+            for (let i = headerIdx + 1; i < rows.length; i++) {
+                const row = rows[i];
+                if (!row || row.length === 0) continue;
+
+                // Employee name — carry forward if empty
+                const empRaw = col.name !== undefined ? String(row[col.name] || '').trim() : '';
+                if (empRaw) lastEmployee = empRaw;
+                if (!lastEmployee) continue;
+
+                // Department — carry forward if empty
+                const deptRaw = col.dept !== undefined ? String(row[col.dept] || '').trim() : '';
+                if (deptRaw) lastDept = deptRaw;
+                const dept = lastDept || EMPLOYEE_DEPT_MAP[lastEmployee] || '未分類';
+
+                // Date — carry forward if empty; parse "2026/01/02（四）" or serial
+                const dateRaw = col.date !== undefined ? row[col.date] : '';
+                if (dateRaw !== '' && dateRaw !== null && dateRaw !== undefined) {
+                    const parsed = parseDateValue(dateRaw, fileYear);
+                    if (parsed) lastDateStr = parsed;
+                }
+                if (!lastDateStr) continue;
+
+                // Task
+                const task = String(row[col.task] || '').trim();
+                if (!task || task === '無資料') continue;
+
+                // Hours
+                const hours = parseFloat(row[col.hours]) || 0;
+                if (hours <= 0) continue;
+
+                const dateMatch = lastDateStr.match(/^(\d{4})-(\d{2})/);
+                const month = dateMatch ? `${dateMatch[1]}-${dateMatch[2]}` : defaultMonthStr;
+
+                records.push({
+                    name: lastEmployee,
+                    dept: dept,
+                    date: lastDateStr,
+                    task: task,
+                    hours: hours,
+                    month: month
+                });
+            }
+            return records;
+        };
+
+        // Robust date parser — handles serial numbers, "YYYY/MM/DD（x）", "M/D", etc.
+        const parseDateValue = (raw, defaultYear) => {
+            if (typeof raw === 'number' && raw > 40000) {
+                return excelDateToString(raw);
+            }
+            const s = String(raw).trim();
+            if (!s) return null;
+            // "2026/01/02（四）" or "2026/01/02"
+            const fullMatch = s.match(/(\d{4})[\/\-](\d{1,2})[\/\-](\d{1,2})/);
+            if (fullMatch) {
+                return `${fullMatch[1]}-${fullMatch[2].padStart(2,'0')}-${fullMatch[3].padStart(2,'0')}`;
+            }
+            // "M/D" format (no year)
+            const mdMatch = s.match(/^(\d{1,2})[\/\-](\d{1,2})$/);
+            if (mdMatch) {
+                const y = defaultYear || new Date().getFullYear();
+                return `${y}-${mdMatch[1].padStart(2,'0')}-${mdMatch[2].padStart(2,'0')}`;
+            }
+            return null;
+        };
+
         const parseWorkLogExcel = (file, filename) => {
             return new Promise((resolve, reject) => {
                 const reader = new FileReader();
@@ -671,10 +768,9 @@
                         const workbook = XLSX.read(data, { type: 'array', cellDates: false });
 
                         // --- FORMAT DETECTION ---
-                        // All-staff cross-tab: filename like "Fandora工作日誌_2026年01月"
-                        // Also double-check by looking for sheet names like "2026_01"
+                        // All-staff file: "Fandora工作日誌_2026年01月" → parse 明細總表 or cross-tab
                         if (isAllStaffFile(filename)) {
-                            const records = parseAllStaffCrossTab(workbook, filename);
+                            const records = parseAllStaffFile(workbook, filename);
                             resolve(records);
                             return;
                         }
@@ -704,15 +800,14 @@
                         // If no month sheets found, try the first sheet as fallback
                         // But only if this is NOT an all-staff file (already handled above)
                         if (allRecords.length === 0 && workbook.SheetNames.length > 0) {
-                            // Secondary cross-tab detection: check first sheet header
+                            // Secondary detection: check if this is an all-staff file by sheet content
+                            if (workbook.SheetNames.includes('明細總表') ||
+                                workbook.SheetNames.some(s => /^\d{4}[_\-]\d{1,2}$/.test(s))) {
+                                const records = parseAllStaffFile(workbook, filename);
+                                if (records.length > 0) { resolve(records); return; }
+                            }
                             const firstSheet = workbook.Sheets[workbook.SheetNames[0]];
                             const firstRows = XLSX.utils.sheet_to_json(firstSheet, { header: 1, defval: '' });
-                            if (firstRows.length > 0 && String(firstRows[0][0]).trim() === '工作內容說明') {
-                                // This is actually a cross-tab file with unexpected filename
-                                const records = parseAllStaffCrossTab(workbook, filename);
-                                resolve(records);
-                                return;
-                            }
 
                             const rows = firstRows;
                             const monthMatch = filename.match(/(\d{4})年(\d{1,2})月/);
@@ -732,11 +827,12 @@
             });
         };
 
-        // Actual columns: 日期(0), 星期(1), 授權IP(2), 工作項目(3), 工作開始時間(4), 工作結束時間(5), 實際時數(6)
+        // Individual format: 日期(0), 星期(1), 授權IP(2), 工作項目(3), 開始(4), 結束(5), 實際時數(6)
+        // KEY FIX: continuation rows have empty date — carry forward the last valid date
         const parseWorkLogRows = (rows, employeeName, dept, defaultMonth, fileYear, sheetMonth) => {
             if (rows.length < 2) return [];
 
-            // Find header row (look for '日期' or '工作項目' in first few rows)
+            // Find header row
             let headerIdx = 0;
             for (let i = 0; i < Math.min(5, rows.length); i++) {
                 const row = rows[i];
@@ -750,66 +846,76 @@
             }
 
             const headers = rows[headerIdx] || [];
-            // Build column index map
             const colIdx = {};
             headers.forEach((h, i) => {
                 const key = String(h).trim();
                 if (key === '日期') colIdx.date = i;
                 if (key === '星期') colIdx.weekday = i;
+                if (key === '授權IP') colIdx.ip = i;
                 if (key === '工作項目') colIdx.task = i;
                 if (key === '工作開始時間') colIdx.startTime = i;
                 if (key === '工作結束時間') colIdx.endTime = i;
                 if (key === '實際時數') colIdx.hours = i;
             });
 
-            // Fallback to positional if headers not found
+            // Positional fallback only if headers not detected
             if (colIdx.date === undefined) colIdx.date = 0;
             if (colIdx.task === undefined) colIdx.task = 3;
             if (colIdx.hours === undefined) colIdx.hours = 6;
 
             const records = [];
+            let lastDateStr = null; // For carrying forward date to continuation rows
 
             for (let i = headerIdx + 1; i < rows.length; i++) {
                 const row = rows[i];
                 if (!row || row.length === 0) continue;
 
                 // Skip template/example rows
-                const firstCell = String(row[0] || '').trim();
-                if (firstCell === '範例1' || firstCell === '範例2' || firstCell === '範例') continue;
-                if (firstCell === '日期') continue; // skip duplicate header rows
+                const firstCell = String(row[colIdx.date] || '').trim();
+                if (/^範例/.test(firstCell)) continue;
+                if (firstCell === '日期') continue;
 
-                // Parse date
-                let dateRaw = row[colIdx.date];
+                // Parse date — use parseDateValue, carry forward for continuation rows
+                const dateRaw = row[colIdx.date];
                 let dateStr = null;
-
                 if (dateRaw !== '' && dateRaw !== null && dateRaw !== undefined) {
-                    if (typeof dateRaw === 'number' && dateRaw > 40000) {
-                        // Excel serial date
-                        dateStr = excelDateToString(dateRaw);
-                    } else if (typeof dateRaw === 'string') {
-                        dateStr = excelDateToString(dateRaw);
+                    if (typeof dateRaw === 'number') {
+                        if (dateRaw > 40000) {
+                            dateStr = excelDateToString(dateRaw);
+                        }
+                        // Small numbers (< 40000) could be M/D misread — try parseDateValue
+                    } else if (typeof dateRaw === 'string' && dateRaw.trim()) {
+                        dateStr = parseDateValue(dateRaw, fileYear);
                     }
                 }
 
-                if (!dateStr) continue; // skip rows without valid date
+                // Update or carry forward date
+                if (dateStr) {
+                    lastDateStr = dateStr;
+                }
+                // If no date and no previous date, skip
+                if (!lastDateStr) continue;
 
-                // Parse task
-                const task = String(row[colIdx.task] || '').trim();
-                if (!task) continue; // skip rows without work item
+                // Parse task — must be a text string, not a number
+                const taskRaw = row[colIdx.task];
+                const task = String(taskRaw || '').trim();
+                if (!task) continue;
+                // Guard: skip if task looks like a pure number (time fraction or serial)
+                if (/^\d+\.?\d*$/.test(task) && parseFloat(task) < 100) continue;
 
                 // Parse hours
                 const hoursRaw = row[colIdx.hours];
                 const hours = parseFloat(hoursRaw) || 0;
-                if (hours <= 0) continue; // skip zero-hour rows
+                if (hours <= 0) continue;
 
-                // Derive month from date or use default
-                const dateMatch = dateStr.match(/^(\d{4})-(\d{2})/);
-                const month = dateMatch ? `${dateMatch[1]}-${dateMatch[2]}` : defaultMonth;
+                // Derive month
+                const dm = lastDateStr.match(/^(\d{4})-(\d{2})/);
+                const month = dm ? `${dm[1]}-${dm[2]}` : defaultMonth;
 
                 records.push({
                     name: employeeName || '未知',
                     dept: dept || '未分類',
-                    date: dateStr,
+                    date: lastDateStr,
                     task: task,
                     hours: hours,
                     month: month || defaultMonth || `${fileYear}-01`
@@ -848,6 +954,8 @@
             const [workLogs, setWorkLogs] = useState([]);
             const [salaryData, setSalaryData] = useState([]);
             const [selectedMonth, setSelectedMonth] = useState('all');
+            const [dateFrom, setDateFrom] = useState('');
+            const [dateTo, setDateTo] = useState('');
             const [loading, setLoading] = useState(false);
             const [message, setMessage] = useState(null);
             const [apiKey, setApiKey] = useState(localStorage.getItem('gdrive_api_key') || '');
@@ -1012,11 +1120,20 @@
                     });
             };
 
-            // Filter data based on selected month
+            // Filter data based on selected month AND date range
             const filteredLogs = useMemo(() => {
-                if (selectedMonth === 'all') return workLogs;
-                return workLogs.filter(log => log.month === selectedMonth);
-            }, [workLogs, selectedMonth]);
+                let logs = workLogs;
+                if (selectedMonth !== 'all') {
+                    logs = logs.filter(log => log.month === selectedMonth);
+                }
+                if (dateFrom) {
+                    logs = logs.filter(log => log.date >= dateFrom);
+                }
+                if (dateTo) {
+                    logs = logs.filter(log => log.date <= dateTo);
+                }
+                return logs;
+            }, [workLogs, selectedMonth, dateFrom, dateTo]);
 
             const filteredSalary = useMemo(() => {
                 if (selectedMonth === 'all') return salaryData;
@@ -1263,9 +1380,9 @@
                         )}
 
                         {activeTab !== 'settings' && (
-                            <div className="toolbar">
+                            <div className="toolbar" style={{flexWrap: 'wrap', gap: '12px'}}>
                                 <div className="toolbar-group">
-                                    <label className="toolbar-label">時間段：</label>
+                                    <label className="toolbar-label">月份：</label>
                                     <select
                                         value={selectedMonth}
                                         onChange={(e) => setSelectedMonth(e.target.value)}
@@ -1276,6 +1393,33 @@
                                         ))}
                                     </select>
                                 </div>
+                                <div className="toolbar-group">
+                                    <label className="toolbar-label">起始日：</label>
+                                    <input
+                                        type="date"
+                                        value={dateFrom}
+                                        onChange={(e) => setDateFrom(e.target.value)}
+                                        style={{padding:'4px 8px',borderRadius:'4px',border:'1px solid #ddd'}}
+                                    />
+                                </div>
+                                <div className="toolbar-group">
+                                    <label className="toolbar-label">截止日：</label>
+                                    <input
+                                        type="date"
+                                        value={dateTo}
+                                        onChange={(e) => setDateTo(e.target.value)}
+                                        style={{padding:'4px 8px',borderRadius:'4px',border:'1px solid #ddd'}}
+                                    />
+                                </div>
+                                {(dateFrom || dateTo) && (
+                                    <button
+                                        className="btn"
+                                        onClick={() => { setDateFrom(''); setDateTo(''); }}
+                                        style={{padding:'4px 12px',fontSize:'13px'}}
+                                    >
+                                        清除日期
+                                    </button>
+                                )}
                                 <button
                                     className="btn btn-primary"
                                     onClick={loadDataFromGDrive}
