@@ -653,6 +653,8 @@
                             dept: EMPLOYEE_DEPT_MAP[empName] || '未分類',
                             date: `${year}-${String(monthNum).padStart(2, '0')}-01`,
                             task: task,
+                            ipProject: '非授權IP',
+                            workType: task,
                             hours: hours,
                             month: monthStr
                         });
@@ -684,6 +686,7 @@
                 if (h === '員工姓名' && col.name === undefined) col.name = i;
                 if (h === '部門') col.dept = i;
                 if (h === '日期') col.date = i;
+                if (h === '授權IP') col.ip = i;
                 if (h === '工作內容說明' && col.task === undefined) col.task = i;
                 if (h === '實際時數' && col.hours === undefined) col.hours = i;
             });
@@ -691,7 +694,7 @@
             if (col.task === undefined || col.hours === undefined) return [];
 
             const records = [];
-            let lastEmployee = '', lastDept = '', lastDateStr = '';
+            let lastEmployee = '', lastDept = '', lastDateStr = '', lastIp = '';
 
             for (let i = headerIdx + 1; i < rows.length; i++) {
                 const row = rows[i];
@@ -707,6 +710,11 @@
                 if (deptRaw) lastDept = deptRaw;
                 const dept = lastDept || EMPLOYEE_DEPT_MAP[lastEmployee] || '未分類';
 
+                // IP Project — carry forward if empty
+                const ipRaw = col.ip !== undefined ? String(row[col.ip] || '').trim() : '';
+                if (ipRaw) lastIp = ipRaw;
+                const ipProject = lastIp || '非授權IP';
+
                 // Date — carry forward if empty; parse "2026/01/02（四）" or serial
                 const dateRaw = col.date !== undefined ? row[col.date] : '';
                 if (dateRaw !== '' && dateRaw !== null && dateRaw !== undefined) {
@@ -715,7 +723,7 @@
                 }
                 if (!lastDateStr) continue;
 
-                // Task
+                // Task (workType)
                 const task = String(row[col.task] || '').trim();
                 if (!task || task === '無資料') continue;
 
@@ -731,6 +739,8 @@
                     dept: dept,
                     date: lastDateStr,
                     task: task,
+                    ipProject: ipProject,
+                    workType: task,
                     hours: hours,
                     month: month
                 });
@@ -896,12 +906,16 @@
                 // If no date and no previous date, skip
                 if (!lastDateStr) continue;
 
-                // Parse task — must be a text string, not a number
+                // Parse task (workType) — must be a text string, not a number
                 const taskRaw = row[colIdx.task];
                 const task = String(taskRaw || '').trim();
                 if (!task) continue;
                 // Guard: skip if task looks like a pure number (time fraction or serial)
                 if (/^\d+\.?\d*$/.test(task) && parseFloat(task) < 100) continue;
+
+                // Parse ipProject (授權IP)
+                const ipRaw = colIdx.ip !== undefined ? row[colIdx.ip] : '';
+                const ipProject = String(ipRaw || '').trim() || '非授權IP';
 
                 // Parse hours
                 const hoursRaw = row[colIdx.hours];
@@ -917,6 +931,8 @@
                     dept: dept || '未分類',
                     date: lastDateStr,
                     task: task,
+                    ipProject: ipProject,
+                    workType: task,
                     hours: hours,
                     month: month || defaultMonth || `${fileYear}-01`
                 });
@@ -963,6 +979,7 @@
             const [salaryFolderId, setSalaryFolderId] = useState(localStorage.getItem('gdrive_salary_folder_id') || '');
             const [testingConnection, setTestingConnection] = useState(false);
             const [selectedProject, setSelectedProject] = useState('all');
+            const [selectedWorkType, setSelectedWorkType] = useState('all');
             const [selectedEmployee, setSelectedEmployee] = useState('all');
             const [selectedDept, setSelectedDept] = useState('all');
 
@@ -1182,15 +1199,59 @@
                 };
             }, [filteredLogs, filteredSalary]);
 
+            // Phase 3: Project cost allocation
+            const projectCosts = useMemo(() => {
+                if (filteredSalary.length === 0) return [];
+                // Build employee monthly hourly rates
+                const rates = {};
+                filteredLogs.forEach(log => {
+                    const key = `${log.name}_${log.month}`;
+                    if (!rates[key]) {
+                        const sal = filteredSalary.find(s => s['員工姓名'] === log.name && String(s['月份']).includes(log.month));
+                        const monthHours = _.sumBy(filteredLogs.filter(l => l.name === log.name && l.month === log.month), 'hours');
+                        rates[key] = sal && monthHours > 0 ? sal['月薪'] / monthHours : 0;
+                    }
+                });
+                // Allocate to projects
+                const costs = {};
+                filteredLogs.forEach(log => {
+                    const ip = log.ipProject || '非授權IP';
+                    if (!costs[ip]) costs[ip] = { name: ip, cost: 0, hours: 0 };
+                    const rate = rates[`${log.name}_${log.month}`] || 0;
+                    costs[ip].cost += rate * log.hours;
+                    costs[ip].hours += log.hours;
+                });
+                return Object.values(costs).sort((a, b) => b.cost - a.cost);
+            }, [filteredLogs, filteredSalary]);
+
+            // Phase 3: Department cost allocation
+            const deptCosts = useMemo(() => {
+                if (filteredSalary.length === 0) return [];
+                const costs = {};
+                filteredLogs.forEach(log => {
+                    if (!costs[log.dept]) costs[log.dept] = { name: log.dept, cost: 0, hours: 0, members: new Set() };
+                    const sal = filteredSalary.find(s => s['員工姓名'] === log.name && String(s['月份']).includes(log.month));
+                    const monthHours = _.sumBy(filteredLogs.filter(l => l.name === log.name && l.month === log.month), 'hours');
+                    const rate = sal && monthHours > 0 ? sal['月薪'] / monthHours : 0;
+                    costs[log.dept].cost += rate * log.hours;
+                    costs[log.dept].hours += log.hours;
+                    costs[log.dept].members.add(log.name);
+                });
+                return Object.values(costs).map(d => ({
+                    ...d, members: Array.from(d.members), memberCount: d.members.size,
+                    avgCostPerMember: d.members.size > 0 ? (d.cost / d.members.size).toFixed(0) : 0
+                })).sort((a, b) => b.cost - a.cost);
+            }, [filteredLogs, filteredSalary]);
+
             // Get all months
             const allMonths = useMemo(() => {
                 const months = _.uniq(workLogs.map(log => log.month)).sort();
                 return months;
             }, [workLogs]);
 
-            // Get all projects
+            // Get all projects (ipProject/授權IP)
             const allProjects = useMemo(() => {
-                return _.uniq(filteredLogs.map(l => l.task)).sort();
+                return _.uniq(filteredLogs.map(l => l.ipProject || '非授權IP')).sort();
             }, [filteredLogs]);
 
             // Get all employees
@@ -1205,9 +1266,9 @@
 
             // Prepare data for charts
             const projectHours = useMemo(() => {
-                const data = _.groupBy(filteredLogs, 'task');
+                const data = _.groupBy(filteredLogs, 'ipProject');
                 return Object.entries(data)
-                    .map(([name, logs]) => ({ name, hours: _.sumBy(logs, 'hours') }))
+                    .map(([name, logs]) => ({ name: name || '非授權IP', hours: _.sumBy(logs, 'hours') }))
                     .sort((a, b) => b.hours - a.hours)
                     .slice(0, 10);
             }, [filteredLogs]);
@@ -1233,21 +1294,24 @@
                     .sort((a, b) => a.month.localeCompare(b.month));
             }, [filteredLogs]);
 
-            // Project analysis
+            // Project analysis (ipProject/授權IP)
             const projectStats = useMemo(() => {
                 const projects = {};
                 filteredLogs.forEach(log => {
-                    if (!projects[log.task]) {
-                        projects[log.task] = {
-                            name: log.task,
+                    const ip = log.ipProject || '非授權IP';
+                    if (!projects[ip]) {
+                        projects[ip] = {
+                            name: ip,
                             hours: 0,
                             employees: new Set(),
-                            depts: new Set()
+                            depts: new Set(),
+                            workTypes: new Set()
                         };
                     }
-                    projects[log.task].hours += log.hours;
-                    projects[log.task].employees.add(log.name);
-                    projects[log.task].depts.add(log.dept);
+                    projects[ip].hours += log.hours;
+                    projects[ip].employees.add(log.name);
+                    projects[ip].depts.add(log.dept);
+                    projects[ip].workTypes.add(log.workType || log.task);
                 });
 
                 return Object.values(projects)
@@ -1255,8 +1319,10 @@
                         ...p,
                         employees: Array.from(p.employees),
                         depts: Array.from(p.depts),
+                        workTypes: Array.from(p.workTypes),
                         employeeCount: p.employees.size,
-                        deptCount: p.depts.size
+                        deptCount: p.depts.size,
+                        workTypeCount: p.workTypes.size
                     }))
                     .sort((a, b) => b.hours - a.hours);
             }, [filteredLogs]);
@@ -1265,8 +1331,52 @@
                 if (selectedProject === 'all') {
                     return projectStats.slice(0, 20);
                 }
-                return projectStats.filter(p => p.name === selectedProject);
+                return projectStats.filter(p => p.name === selectedProject || (p.name === selectedProject || p.ipProject === selectedProject));
             }, [projectStats, selectedProject]);
+
+            // Work type hours
+            const workTypeHours = useMemo(() => {
+                const data = _.groupBy(filteredLogs, 'workType');
+                return Object.entries(data)
+                    .map(([name, logs]) => ({ name, hours: _.sumBy(logs, 'hours') }))
+                    .sort((a, b) => b.hours - a.hours)
+                    .slice(0, 15);
+            }, [filteredLogs]);
+
+            // Work type stats
+            const workTypeStats = useMemo(() => {
+                const types = {};
+                filteredLogs.forEach(log => {
+                    const wt = log.workType || log.task;
+                    if (!types[wt]) {
+                        types[wt] = { name: wt, hours: 0, employees: new Set(), depts: new Set(), ips: new Set() };
+                    }
+                    types[wt].hours += log.hours;
+                    types[wt].employees.add(log.name);
+                    types[wt].depts.add(log.dept);
+                    if (log.ipProject && log.ipProject !== '非授權IP') types[wt].ips.add(log.ipProject);
+                });
+                return Object.values(types)
+                    .map(t => ({
+                        ...t,
+                        employees: Array.from(t.employees),
+                        depts: Array.from(t.depts),
+                        ips: Array.from(t.ips),
+                        employeeCount: t.employees.size,
+                        deptCount: t.depts.size,
+                        ipCount: t.ips.size
+                    }))
+                    .sort((a, b) => b.hours - a.hours);
+            }, [filteredLogs]);
+
+            const selectedWorkTypeData = useMemo(() => {
+                if (selectedWorkType === 'all') return workTypeStats.slice(0, 20);
+                return workTypeStats.filter(w => w.name === selectedWorkType);
+            }, [workTypeStats, selectedWorkType]);
+
+            const allWorkTypes = useMemo(() => {
+                return _.uniq(filteredLogs.map(l => l.workType || l.task)).sort();
+            }, [filteredLogs]);
 
             // Employee analysis
             const employeeStats = useMemo(() => {
@@ -1345,6 +1455,45 @@
                 return deptStats.filter(d => d.name === selectedDept);
             }, [deptStats, selectedDept]);
 
+            // Phase 4: Monthly trend by project (top 5 IPs)
+            const monthlyProjectTrend = useMemo(() => {
+                const top5 = projectStats.slice(0, 5).map(p => p.name);
+                const months = _.uniq(filteredLogs.map(l => l.month)).sort();
+                return months.map(m => {
+                    const entry = { month: m };
+                    top5.forEach(ip => {
+                        entry[ip] = _.sumBy(filteredLogs.filter(l => (l.ipProject || '非授權IP') === ip && l.month === m), 'hours');
+                    });
+                    return entry;
+                });
+            }, [filteredLogs, projectStats]);
+
+            // Phase 4: Monthly trend by department
+            const monthlyDeptTrend = useMemo(() => {
+                const depts = _.uniq(filteredLogs.map(l => l.dept));
+                const months = _.uniq(filteredLogs.map(l => l.month)).sort();
+                return months.map(m => {
+                    const entry = { month: m };
+                    depts.forEach(d => {
+                        entry[d] = _.sumBy(filteredLogs.filter(l => l.dept === d && l.month === m), 'hours');
+                    });
+                    return entry;
+                });
+            }, [filteredLogs]);
+
+            // Phase 4: Monthly trend by employee (top 5)
+            const monthlyEmployeeTrend = useMemo(() => {
+                const top5 = employeeStats.slice(0, 5).map(e => e.name);
+                const months = _.uniq(filteredLogs.map(l => l.month)).sort();
+                return months.map(m => {
+                    const entry = { month: m };
+                    top5.forEach(emp => {
+                        entry[emp] = _.sumBy(filteredLogs.filter(l => l.name === emp && l.month === m), 'hours');
+                    });
+                    return entry;
+                });
+            }, [filteredLogs, employeeStats]);
+
             return (
                 <div>
                     <header className="header">
@@ -1358,6 +1507,7 @@
                         {[
                             { id: 'overview', label: '總表' },
                             { id: 'projects', label: '專案分析' },
+                            { id: 'workTypes', label: '工作項目分析' },
                             { id: 'employees', label: '員工分析' },
                             { id: 'departments', label: '部門分析' },
                             { id: 'settings', label: '設定' }
@@ -1544,6 +1694,21 @@
                                     </div>
                                 )}
 
+                                {projectCosts.length > 0 && (
+                                    <div className="chart-container">
+                                        <div className="chart-title">授權IP 成本分攤排行</div>
+                                        <ResponsiveContainer width="100%" height={Math.max(200, projectCosts.length * 25)}>
+                                            <BarChart data={projectCosts.slice(0, 10)} layout="vertical">
+                                                <CartesianGrid strokeDasharray="3 3" />
+                                                <XAxis type="number" />
+                                                <YAxis dataKey="name" type="category" width={100} />
+                                                <Tooltip formatter={(value) => `$${Number(value).toFixed(0)}`} />
+                                                <Bar dataKey="cost" fill="#E91E63" />
+                                            </BarChart>
+                                        </ResponsiveContainer>
+                                    </div>
+                                )}
+
                                 {filteredLogs.length > 0 && (
                                     <div
                                         className="collapsible"
@@ -1559,6 +1724,7 @@
                                                 salary={filteredSalary}
                                                 projectStats={projectStats}
                                                 employeeStats={employeeStats}
+                                                monthlyProjectTrend={monthlyProjectTrend}
                                             />
                                         </div>
                                     </div>
@@ -1588,7 +1754,7 @@
                                     <div className="responsive-grid">
                                         <div className="chart-container">
                                             <div className="chart-title">
-                                                {selectedProject === 'all' ? 'Top 20 專案工時' : selectedProject}
+                                                {selectedProject === 'all' ? 'Top 20 授權IP工時' : selectedProject}
                                             </div>
                                             <ResponsiveContainer width="100%" height={400}>
                                                 <BarChart
@@ -1616,7 +1782,7 @@
                                                         data={selectedProjectData[0].employees.map(emp => {
                                                             const hours = _.sumBy(
                                                                 filteredLogs.filter(l =>
-                                                                    l.task === selectedProject && l.name === emp
+                                                                    (l.ipProject || '非授權IP') === selectedProject && l.name === emp
                                                                 ),
                                                                 'hours'
                                                             );
@@ -1642,7 +1808,7 @@
                                                             data={selectedProjectData[0].depts.map(dept => {
                                                                 const hours = _.sumBy(
                                                                     filteredLogs.filter(l =>
-                                                                        l.task === selectedProject && l.dept === dept
+                                                                        (l.ipProject || '非授權IP') === selectedProject && l.dept === dept
                                                                     ),
                                                                     'hours'
                                                                 );
@@ -1667,14 +1833,15 @@
 
                                 {projectStats.length > 0 && (
                                     <div className="table-container">
-                                        <div className="chart-title">專案彙總</div>
+                                        <div className="chart-title">授權IP彙總</div>
                                         <table>
                                             <thead>
                                                 <tr>
-                                                    <th>專案名稱</th>
+                                                    <th>授權IP</th>
                                                     <th>總工時</th>
                                                     <th>參與員工</th>
                                                     <th>部門數</th>
+                                                    <th>工作項目數</th>
                                                 </tr>
                                             </thead>
                                             <tbody>
@@ -1684,6 +1851,7 @@
                                                         <td>{p.hours.toFixed(2)}</td>
                                                         <td>{p.employeeCount}</td>
                                                         <td>{p.deptCount}</td>
+                                                        <td>{p.workTypeCount}</td>
                                                     </tr>
                                                 ))}
                                             </tbody>
@@ -1704,7 +1872,83 @@
                                             <AdvancedAnalyticsProject
                                                 projectStats={projectStats}
                                                 logs={filteredLogs}
+                                                monthlyProjectTrend={monthlyProjectTrend}
                                             />
+                                        </div>
+                                    </div>
+                                )}
+                            </div>
+                        )}
+
+                        {/* Work Types Tab */}
+                        {activeTab === 'workTypes' && (
+                            <div>
+                                <div className="toolbar-group" style={{marginBottom: '16px'}}>
+                                    <label className="toolbar-label">工作項目：</label>
+                                    <select value={selectedWorkType} onChange={(e) => setSelectedWorkType(e.target.value)}>
+                                        <option value="all">全部</option>
+                                        {allWorkTypes.map(wt => (
+                                            <option key={wt} value={wt}>{wt}</option>
+                                        ))}
+                                    </select>
+                                </div>
+
+                                {selectedWorkTypeData.length > 0 && (
+                                    <div className="chart-container">
+                                        <div className="chart-title">工作項目工時排行</div>
+                                        <div className="table-wrapper">
+                                            <table>
+                                                <thead>
+                                                    <tr>
+                                                        <th>工作項目</th>
+                                                        <th>工時</th>
+                                                        <th>參與人數</th>
+                                                        <th>涉及部門</th>
+                                                        <th>相關授權IP</th>
+                                                    </tr>
+                                                </thead>
+                                                <tbody>
+                                                    {selectedWorkTypeData.map((wt, idx) => (
+                                                        <tr key={idx}>
+                                                            <td>{wt.name}</td>
+                                                            <td>{wt.hours.toFixed(2)}</td>
+                                                            <td>{wt.employeeCount}</td>
+                                                            <td>{wt.deptCount}</td>
+                                                            <td>{wt.ipCount}</td>
+                                                        </tr>
+                                                    ))}
+                                                </tbody>
+                                            </table>
+                                        </div>
+                                    </div>
+                                )}
+
+                                {workTypeHours.length > 0 && (
+                                    <div className="chart-container">
+                                        <div className="chart-title">工作項目工時分佈</div>
+                                        <ResponsiveContainer width="100%" height={Math.max(300, workTypeHours.length * 25)}>
+                                            <BarChart data={workTypeHours} layout="vertical">
+                                                <CartesianGrid strokeDasharray="3 3" />
+                                                <XAxis type="number" />
+                                                <YAxis dataKey="name" type="category" width={120} />
+                                                <Tooltip />
+                                                <Bar dataKey="hours" fill="#FF9800" />
+                                            </BarChart>
+                                        </ResponsiveContainer>
+                                    </div>
+                                )}
+
+                                {filteredLogs.length > 0 && (
+                                    <div
+                                        className="collapsible"
+                                        onClick={(e) => e.currentTarget.classList.toggle('open')}
+                                    >
+                                        <div className="collapsible-header">
+                                            進階分析
+                                            <span className="collapsible-toggle">▼</span>
+                                        </div>
+                                        <div className="collapsible-content">
+                                            <AdvancedAnalyticsWorkType workTypeStats={workTypeStats} logs={filteredLogs} />
                                         </div>
                                     </div>
                                 )}
@@ -1856,6 +2100,7 @@
                                             <AdvancedAnalyticsEmployee
                                                 employeeStats={employeeStats}
                                                 logs={filteredLogs}
+                                                monthlyEmployeeTrend={monthlyEmployeeTrend}
                                             />
                                         </div>
                                     </div>
@@ -1998,6 +2243,7 @@
                                             <AdvancedAnalyticsDepartment
                                                 deptStats={deptStats}
                                                 logs={filteredLogs}
+                                                monthlyDeptTrend={monthlyDeptTrend}
                                             />
                                         </div>
                                     </div>
@@ -2181,7 +2427,7 @@
         };
 
         // Advanced Analytics Components
-        const AdvancedAnalyticsOverview = ({ logs, salary, projectStats, employeeStats }) => {
+        const AdvancedAnalyticsOverview = ({ logs, salary, projectStats, employeeStats, monthlyProjectTrend }) => {
             const insights = useMemo(() => {
                 const insights = [];
 
@@ -2219,17 +2465,34 @@
                             {insight}
                         </div>
                     ))}
+                    {monthlyProjectTrend && monthlyProjectTrend.length > 1 && (
+                        <div style={{marginTop: '20px'}}>
+                            <div className="chart-title">Top 5 授權IP 逐月趨勢</div>
+                            <ResponsiveContainer width="100%" height={300}>
+                                <LineChart data={monthlyProjectTrend}>
+                                    <CartesianGrid strokeDasharray="3 3" />
+                                    <XAxis dataKey="month" />
+                                    <YAxis />
+                                    <Tooltip />
+                                    <Legend />
+                                    {Object.keys(monthlyProjectTrend[0] || {}).filter(k => k !== 'month').map((key, idx) => (
+                                        <Line key={key} type="monotone" dataKey={key} stroke={COLORS[idx % COLORS.length]} />
+                                    ))}
+                                </LineChart>
+                            </ResponsiveContainer>
+                        </div>
+                    )}
                 </div>
             );
         };
 
-        const AdvancedAnalyticsProject = ({ projectStats, logs }) => {
+        const AdvancedAnalyticsProject = ({ projectStats, logs, monthlyProjectTrend }) => {
             const insights = useMemo(() => {
                 if (projectStats.length === 0) return [];
 
                 const insights = [];
                 const highestCost = _.maxBy(projectStats, p => {
-                    return _.sumBy(logs.filter(l => l.task === p.name), 'hours');
+                    return _.sumBy(logs.filter(l => (l.ipProject || '非授權IP') === p.name), 'hours');
                 });
 
                 if (highestCost) {
@@ -2252,11 +2515,28 @@
                             {insight}
                         </div>
                     ))}
+                    {monthlyProjectTrend && monthlyProjectTrend.length > 1 && (
+                        <div style={{marginTop: '20px'}}>
+                            <div className="chart-title">Top 5 授權IP 逐月趨勢</div>
+                            <ResponsiveContainer width="100%" height={300}>
+                                <LineChart data={monthlyProjectTrend}>
+                                    <CartesianGrid strokeDasharray="3 3" />
+                                    <XAxis dataKey="month" />
+                                    <YAxis />
+                                    <Tooltip />
+                                    <Legend />
+                                    {Object.keys(monthlyProjectTrend[0] || {}).filter(k => k !== 'month').map((key, idx) => (
+                                        <Line key={key} type="monotone" dataKey={key} stroke={COLORS[idx % COLORS.length]} />
+                                    ))}
+                                </LineChart>
+                            </ResponsiveContainer>
+                        </div>
+                    )}
                 </div>
             );
         };
 
-        const AdvancedAnalyticsEmployee = ({ employeeStats, logs }) => {
+        const AdvancedAnalyticsEmployee = ({ employeeStats, logs, monthlyEmployeeTrend }) => {
             const insights = useMemo(() => {
                 if (employeeStats.length === 0) return [];
 
@@ -2287,11 +2567,28 @@
                             {insight}
                         </div>
                     ))}
+                    {monthlyEmployeeTrend && monthlyEmployeeTrend.length > 1 && (
+                        <div style={{marginTop: '20px'}}>
+                            <div className="chart-title">Top 5 員工 逐月趨勢</div>
+                            <ResponsiveContainer width="100%" height={300}>
+                                <LineChart data={monthlyEmployeeTrend}>
+                                    <CartesianGrid strokeDasharray="3 3" />
+                                    <XAxis dataKey="month" />
+                                    <YAxis />
+                                    <Tooltip />
+                                    <Legend />
+                                    {Object.keys(monthlyEmployeeTrend[0] || {}).filter(k => k !== 'month').map((key, idx) => (
+                                        <Line key={key} type="monotone" dataKey={key} stroke={COLORS[idx % COLORS.length]} />
+                                    ))}
+                                </LineChart>
+                            </ResponsiveContainer>
+                        </div>
+                    )}
                 </div>
             );
         };
 
-        const AdvancedAnalyticsDepartment = ({ deptStats, logs }) => {
+        const AdvancedAnalyticsDepartment = ({ deptStats, logs, monthlyDeptTrend }) => {
             const insights = useMemo(() => {
                 if (deptStats.length === 0) return [];
 
@@ -2330,6 +2627,44 @@
                         <div key={idx} className="insight-item">
                             {insight}
                         </div>
+                    ))}
+                    {monthlyDeptTrend && monthlyDeptTrend.length > 1 && (
+                        <div style={{marginTop: '20px'}}>
+                            <div className="chart-title">各部門逐月趨勢</div>
+                            <ResponsiveContainer width="100%" height={300}>
+                                <LineChart data={monthlyDeptTrend}>
+                                    <CartesianGrid strokeDasharray="3 3" />
+                                    <XAxis dataKey="month" />
+                                    <YAxis />
+                                    <Tooltip />
+                                    <Legend />
+                                    {Object.keys(monthlyDeptTrend[0] || {}).filter(k => k !== 'month').map((key, idx) => (
+                                        <Line key={key} type="monotone" dataKey={key} stroke={COLORS[idx % COLORS.length]} />
+                                    ))}
+                                </LineChart>
+                            </ResponsiveContainer>
+                        </div>
+                    )}
+                </div>
+            );
+        };
+
+        const AdvancedAnalyticsWorkType = ({ workTypeStats, logs }) => {
+            const insights = useMemo(() => {
+                if (workTypeStats.length === 0) return [];
+                const insights = [];
+                insights.push(`最耗時的工作項目: ${workTypeStats[0].name} (${workTypeStats[0].hours.toFixed(2)} 小時)`);
+                const mostCross = _.maxBy(workTypeStats, 'employeeCount');
+                if (mostCross) insights.push(`最多人參與的工作項目: ${mostCross.name} (${mostCross.employeeCount} 人)`);
+                const mostIP = _.maxBy(workTypeStats, 'ipCount');
+                if (mostIP && mostIP.ipCount > 0) insights.push(`橫跨最多授權IP的工作項目: ${mostIP.name} (${mostIP.ipCount} 個IP)`);
+                return insights;
+            }, [workTypeStats, logs]);
+            return (
+                <div>
+                    <div className="chart-title">工作項目洞察</div>
+                    {insights.map((insight, idx) => (
+                        <div key={idx} className="insight-item">{insight}</div>
                     ))}
                 </div>
             );
