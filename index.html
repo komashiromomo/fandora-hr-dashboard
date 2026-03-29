@@ -739,18 +739,20 @@
                 const task = String(row[col.task] || '').trim();
                 if (!task || task === '無資料') continue;
 
-                // Classify: if IP column exists, use it; otherwise infer from task name
-                let ipProject, workType;
-                if (col.ip !== undefined) {
-                    // Has explicit IP column
-                    ipProject = lastIp || '非授權IP';
-                    workType = task;
+                // Classify IP vs workType — always check task against known IP list
+                const taskIsIP = isKnownIP(task);
+                let ipProject;
+                if (col.ip !== undefined && lastIp) {
+                    // Has explicit IP column with data
+                    ipProject = lastIp;
+                } else if (taskIsIP) {
+                    // Task itself is an IP name (cross-tab or empty IP column)
+                    ipProject = task;
                 } else {
-                    // No IP column — classify by known IP list
-                    const taskIsIP = isKnownIP(task);
-                    ipProject = taskIsIP ? task : '非授權IP';
-                    workType = taskIsIP ? 'IP相關作業' : task;
+                    ipProject = '非授權IP';
                 }
+                // workType: never use IP name as work type
+                const workType = taskIsIP ? 'IP相關作業' : task;
 
                 // Hours
                 const hours = parseFloat(row[col.hours]) || 0;
@@ -938,9 +940,19 @@
                 // Guard: skip if task looks like a pure number (time fraction or serial)
                 if (/^\d+\.?\d*$/.test(task) && parseFloat(task) < 100) continue;
 
-                // Parse ipProject (授權IP)
-                const ipRaw = colIdx.ip !== undefined ? row[colIdx.ip] : '';
-                const ipProject = String(ipRaw || '').trim() || '非授權IP';
+                // Parse ipProject (授權IP) — with known IP fallback
+                const ipRaw = colIdx.ip !== undefined ? String(row[colIdx.ip] || '').trim() : '';
+                const taskIsIPCheck = isKnownIP(task);
+                let ipProject;
+                if (ipRaw) {
+                    ipProject = ipRaw;
+                } else if (taskIsIPCheck) {
+                    ipProject = task;
+                } else {
+                    ipProject = '非授權IP';
+                }
+                // workType: never use IP name as work type
+                const workType = taskIsIPCheck ? 'IP相關作業' : task;
 
                 // Parse hours
                 const hoursRaw = row[colIdx.hours];
@@ -957,7 +969,7 @@
                     date: lastDateStr,
                     task: task,
                     ipProject: ipProject,
-                    workType: task,
+                    workType: workType,
                     hours: hours,
                     month: month || defaultMonth || `${fileYear}-01`
                 });
