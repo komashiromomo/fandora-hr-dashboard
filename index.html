@@ -1236,6 +1236,18 @@
                 });
             }, [salaryData, selectedMonth]);
 
+            // Calculate monthly total cost from salary data (sum of all 月薪 per month)
+            const monthlyCostMap = useMemo(() => {
+                const map = {};
+                filteredSalary.forEach(sal => {
+                    const month = String(sal['月份'] || '').substring(0, 7);
+                    if (!month) return;
+                    if (!map[month]) map[month] = 0;
+                    map[month] += parseFloat(sal['月薪']) || 0;
+                });
+                return map;
+            }, [filteredSalary]);
+
             // Calculate KPIs
             const kpis = useMemo(() => {
                 const uniqueEmployees = _.uniqBy(filteredLogs, 'name').length;
@@ -1243,27 +1255,14 @@
                 const totalHours = _.sumBy(filteredLogs, 'hours');
                 const avgHours = uniqueEmployees > 0 ? (totalHours / uniqueEmployees).toFixed(2) : 0;
 
+                // Cost = sum of monthly total costs, allocated proportionally by hours
                 let totalCost = 0;
-                let avgHourlyRate = 0;
-
-                if (filteredSalary.length > 0) {
-                    filteredLogs.forEach(log => {
-                        const salary = filteredSalary.find(s =>
-                            s['員工姓名'] === log.name &&
-                            s['月份'].includes(log.month)
-                        );
-                        if (salary) {
-                            const monthlyHours = _.sumBy(
-                                filteredLogs.filter(l => l.name === log.name && l.month === log.month),
-                                'hours'
-                            );
-                            const hourlyRate = monthlyHours > 0 ? salary['月薪'] / monthlyHours : 0;
-                            totalCost += hourlyRate * log.hours;
-                        }
+                if (Object.keys(monthlyCostMap).length > 0) {
+                    Object.keys(monthlyCostMap).forEach(month => {
+                        totalCost += monthlyCostMap[month] || 0;
                     });
-                    const totalWorked = filteredLogs.length > 0 ? totalHours : 1;
-                    avgHourlyRate = (totalCost / totalWorked).toFixed(2);
                 }
+                const avgHourlyRate = totalHours > 0 && totalCost > 0 ? (totalCost / totalHours).toFixed(2) : 0;
 
                 return {
                     totalHours: totalHours.toFixed(2),
@@ -1273,51 +1272,52 @@
                     totalCost: totalCost.toFixed(2),
                     avgHourlyRate
                 };
-            }, [filteredLogs, filteredSalary]);
+            }, [filteredLogs, filteredSalary, monthlyCostMap]);
 
-            // Phase 3: Project cost allocation
+            // Project cost allocation: monthly total cost ÷ proportional hours
             const projectCosts = useMemo(() => {
-                if (filteredSalary.length === 0) return [];
-                // Build employee monthly hourly rates
-                const rates = {};
+                if (Object.keys(monthlyCostMap).length === 0) return [];
+                // Calculate total hours per month
+                const monthTotalHours = {};
                 filteredLogs.forEach(log => {
-                    const key = `${log.name}_${log.month}`;
-                    if (!rates[key]) {
-                        const sal = filteredSalary.find(s => s['員工姓名'] === log.name && String(s['月份']).includes(log.month));
-                        const monthHours = _.sumBy(filteredLogs.filter(l => l.name === log.name && l.month === log.month), 'hours');
-                        rates[key] = sal && monthHours > 0 ? sal['月薪'] / monthHours : 0;
-                    }
+                    if (!monthTotalHours[log.month]) monthTotalHours[log.month] = 0;
+                    monthTotalHours[log.month] += log.hours;
                 });
-                // Allocate to projects
+                // Allocate monthly cost to projects proportionally by hours
                 const costs = {};
                 filteredLogs.forEach(log => {
                     const ip = log.ipProject || '非授權IP';
                     if (!costs[ip]) costs[ip] = { name: ip, cost: 0, hours: 0 };
-                    const rate = rates[`${log.name}_${log.month}`] || 0;
-                    costs[ip].cost += rate * log.hours;
                     costs[ip].hours += log.hours;
+                    const mCost = monthlyCostMap[log.month] || 0;
+                    const mHours = monthTotalHours[log.month] || 1;
+                    costs[ip].cost += (log.hours / mHours) * mCost;
                 });
                 return Object.values(costs).sort((a, b) => b.cost - a.cost);
-            }, [filteredLogs, filteredSalary]);
+            }, [filteredLogs, monthlyCostMap]);
 
-            // Phase 3: Department cost allocation
+            // Department cost allocation: same proportional logic
             const deptCosts = useMemo(() => {
-                if (filteredSalary.length === 0) return [];
+                if (Object.keys(monthlyCostMap).length === 0) return [];
+                const monthTotalHours = {};
+                filteredLogs.forEach(log => {
+                    if (!monthTotalHours[log.month]) monthTotalHours[log.month] = 0;
+                    monthTotalHours[log.month] += log.hours;
+                });
                 const costs = {};
                 filteredLogs.forEach(log => {
                     if (!costs[log.dept]) costs[log.dept] = { name: log.dept, cost: 0, hours: 0, members: new Set() };
-                    const sal = filteredSalary.find(s => s['員工姓名'] === log.name && String(s['月份']).includes(log.month));
-                    const monthHours = _.sumBy(filteredLogs.filter(l => l.name === log.name && l.month === log.month), 'hours');
-                    const rate = sal && monthHours > 0 ? sal['月薪'] / monthHours : 0;
-                    costs[log.dept].cost += rate * log.hours;
                     costs[log.dept].hours += log.hours;
                     costs[log.dept].members.add(log.name);
+                    const mCost = monthlyCostMap[log.month] || 0;
+                    const mHours = monthTotalHours[log.month] || 1;
+                    costs[log.dept].cost += (log.hours / mHours) * mCost;
                 });
                 return Object.values(costs).map(d => ({
                     ...d, members: Array.from(d.members), memberCount: d.members.size,
                     avgCostPerMember: d.members.size > 0 ? (d.cost / d.members.size).toFixed(0) : 0
                 })).sort((a, b) => b.cost - a.cost);
-            }, [filteredLogs, filteredSalary]);
+            }, [filteredLogs, monthlyCostMap]);
 
             // Get all months
             const allMonths = useMemo(() => {
@@ -1454,7 +1454,7 @@
                 return _.uniq(filteredLogs.map(l => l.workType || l.task)).sort();
             }, [filteredLogs]);
 
-            // Employee analysis
+            // Employee analysis — NO salary/cost info to avoid misunderstanding
             const employeeStats = useMemo(() => {
                 const employees = {};
                 filteredLogs.forEach(log => {
@@ -1463,29 +1463,21 @@
                             name: log.name,
                             dept: log.dept,
                             hours: 0,
-                            tasks: new Set(),
-                            salary: 0
+                            tasks: new Set()
                         };
                     }
                     employees[log.name].hours += log.hours;
                     employees[log.name].tasks.add(log.task);
                 });
 
-                filteredSalary.forEach(sal => {
-                    if (employees[sal['員工姓名']]) {
-                        employees[sal['員工姓名']].salary = sal['月薪'];
-                    }
-                });
-
                 return Object.values(employees)
                     .map(e => ({
                         ...e,
                         tasks: Array.from(e.tasks),
-                        taskCount: e.tasks.size,
-                        hourlyRate: e.hours > 0 && e.salary > 0 ? (e.salary / e.hours).toFixed(2) : 0
+                        taskCount: e.tasks.size
                     }))
                     .sort((a, b) => b.hours - a.hours);
-            }, [filteredLogs, filteredSalary]);
+            }, [filteredLogs]);
 
             const selectedEmployeeData = useMemo(() => {
                 if (selectedEmployee === 'all') {
@@ -2107,12 +2099,6 @@
                                                         <td><strong>工作分類數</strong></td>
                                                         <td>{selectedEmployeeData[0].taskCount}</td>
                                                     </tr>
-                                                    {selectedEmployeeData[0].hourlyRate > 0 && (
-                                                        <tr>
-                                                            <td><strong>時薪</strong></td>
-                                                            <td>¥{selectedEmployeeData[0].hourlyRate}/小時</td>
-                                                        </tr>
-                                                    )}
                                                 </tbody>
                                             </table>
                                         </div>
