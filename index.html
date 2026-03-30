@@ -1001,7 +1001,7 @@
             const [message, setMessage] = useState(null);
             const [apiKey, setApiKey] = useState(localStorage.getItem('gdrive_api_key') || '');
             const [folderId, setFolderId] = useState(localStorage.getItem('gdrive_folder_id') || '');
-            const [salaryFolderId, setSalaryFolderId] = useState(localStorage.getItem('gdrive_salary_folder_id') || '');
+            const [costSheetId, setCostSheetId] = useState(localStorage.getItem('gdrive_cost_sheet_id') || '');
             const [testingConnection, setTestingConnection] = useState(false);
             const [selectedProject, setSelectedProject] = useState('all');
             const [selectedWorkType, setSelectedWorkType] = useState('all');
@@ -1015,20 +1015,75 @@
                 }
             }, []);
 
+            // Fetch cost data from a Google Sheet via Drive API export (CSV)
+            const fetchCostFromGSheet = async (sheetId) => {
+                const url = `https://www.googleapis.com/drive/v3/files/${sheetId}/export?mimeType=text/csv&key=${apiKey}`;
+                const resp = await fetch(url);
+                if (!resp.ok) throw new Error(`Google Sheet export error: ${resp.statusText}`);
+                const csvText = await resp.text();
+                const rows = csvText.split('\n').map(row => {
+                    // Parse CSV respecting quoted fields
+                    const cells = [];
+                    let current = '';
+                    let inQuotes = false;
+                    for (let i = 0; i < row.length; i++) {
+                        const ch = row[i];
+                        if (ch === '"') { inQuotes = !inQuotes; }
+                        else if (ch === ',' && !inQuotes) { cells.push(current.trim()); current = ''; }
+                        else if (ch !== '\r') { current += ch; }
+                    }
+                    cells.push(current.trim());
+                    return cells;
+                });
+                if (rows.length < 2) return [];
+                const header = rows[0]; // ['', '人事費', '房租場租', '硬體系統費用', '雜費', '總計']
+                const data = [];
+                for (let i = 1; i < rows.length; i++) {
+                    const cells = rows[i];
+                    if (!cells[0]) continue;
+                    // Parse month: "2025/9" → "2025-09"
+                    const parts = cells[0].split('/');
+                    if (parts.length < 2) continue;
+                    const month = `${parts[0]}-${parts[1].padStart(2, '0')}`;
+                    const parseCurrency = (s) => parseFloat((s || '').replace(/[$,¥￥\s]/g, '')) || 0;
+                    const totalVal = parseCurrency(cells[5]);
+                    if (totalVal === 0) continue; // skip empty months
+                    const record = {
+                        '月份': month,
+                        '月薪': totalVal,
+                        '人事費': parseCurrency(cells[1]),
+                        '房租場租': parseCurrency(cells[2]),
+                        '硬體系統費用': parseCurrency(cells[3]),
+                        '雜費': parseCurrency(cells[4]),
+                        '總計': totalVal
+                    };
+                    data.push(record);
+                }
+                console.log(`✅ Cost Sheet: ${data.length} months loaded`, data);
+                return data;
+            };
+
             const loadDataFromGDrive = useCallback(async () => {
                 setLoading(true);
                 setMessage(null);
                 try {
                     const workLogsData = await fetchFilesFromGDrive(folderId, 'work');
-                    const salariesData = await fetchFilesFromGDrive(salaryFolderId || folderId, 'salary');
+                    let salariesData = [];
+                    if (costSheetId) {
+                        try {
+                            salariesData = await fetchCostFromGSheet(costSheetId);
+                        } catch (e) {
+                            console.error('Cost sheet load failed:', e);
+                        }
+                    }
                     setWorkLogs(workLogsData);
                     setSalaryData(salariesData);
-                    setMessage({ type: 'success', text: '数据加载成功' });
+                    setMessage({ type: 'success', text: `資料載入成功${salariesData.length > 0 ? `（含 ${salariesData.length} 月費用資料）` : ''}` });
                 } catch (error) {
-                    setMessage({ type: 'error', text: `加载失败: ${error.message}` });
+                    setMessage({ type: 'error', text: `載入失敗: ${error.message}` });
                 }
                 setLoading(false);
-            }, [apiKey, folderId, salaryFolderId]);
+            }, [apiKey, folderId, costSheetId]);
 
             const listFolderFiles = async (fId) => {
                 const allFiles = [];
@@ -1154,7 +1209,7 @@
             const handleSaveSettings = () => {
                 localStorage.setItem('gdrive_api_key', apiKey);
                 localStorage.setItem('gdrive_folder_id', folderId);
-                localStorage.setItem('gdrive_salary_folder_id', salaryFolderId);
+                localStorage.setItem('gdrive_cost_sheet_id', costSheetId);
                 setMessage({ type: 'success', text: '设置已保存' });
             };
 
@@ -1678,13 +1733,13 @@
                                     <div className="kpi-grid">
                                         <div className="kpi-card">
                                             <div className="kpi-label">總管理費用</div>
-                                            <div className="kpi-value">¥{kpis.totalCost}</div>
-                                            <div className="kpi-unit">元</div>
+                                            <div className="kpi-value">${Number(kpis.totalCost).toLocaleString()}</div>
+                                            <div className="kpi-unit">NTD</div>
                                         </div>
                                         <div className="kpi-card">
                                             <div className="kpi-label">平均時薪成本</div>
-                                            <div className="kpi-value">¥{kpis.avgHourlyRate}</div>
-                                            <div className="kpi-unit">元/小時</div>
+                                            <div className="kpi-value">${Number(kpis.avgHourlyRate).toLocaleString()}</div>
+                                            <div className="kpi-unit">NTD/小時</div>
                                         </div>
                                     </div>
                                 )}
@@ -2346,15 +2401,15 @@
                                     </div>
 
                                     <div className="form-group">
-                                        <label>薪資資料夾 ID (可選)</label>
+                                        <label>費用試算表 ID (可選)</label>
                                         <input
                                             type="text"
-                                            value={salaryFolderId}
-                                            onChange={(e) => setSalaryFolderId(e.target.value)}
-                                            placeholder="輸入資料夾 ID，或留空以使用同一資料夾"
+                                            value={costSheetId}
+                                            onChange={(e) => setCostSheetId(e.target.value)}
+                                            placeholder="輸入 Google 試算表 ID"
                                         />
                                         <div className="help-text">
-                                            如果薪資檔案與工時日誌在同一資料夾，可以留空
+                                            Google 試算表連結中 /d/ 後面的那段 ID，用於計算費用分攤
                                         </div>
                                     </div>
 
