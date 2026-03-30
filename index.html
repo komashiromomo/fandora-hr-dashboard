@@ -548,20 +548,35 @@
         const COLORS = ['#00BCD4', '#FF6B6B', '#4ECDC4', '#45B7D1', '#FFA07A',
                         '#98D8C8', '#F7DC6F', '#BB8FCE', '#85C1E2', '#F8B88B'];
 
-        // Excel parsing utilities
+        // ========== DATA LOADING LAYER v2 (rewritten 2026-03-30) ==========
+        // Design principles:
+        // 1. 明細總表 ONLY — never use cross-tab (unreliable sheet names for 11月/12月)
+        // 2. Month from FILENAME — 11月/12月 data has wrong dates (copied template)
+        // 3. All names normalized to real names via NICKNAME_TO_REAL
+        // 4. Flexible header detection via keyword search, not fixed indices
+        // 5. Individual files supplement only months NOT covered by all-staff files
 
-        // Department mapping — real names from 明細總表 + nicknames from individual files
+        // Verified nickname → real name mapping (from cross-matching Feb hours)
+        const NICKNAME_TO_REAL = {
+            'Kate': '余凱紓', 'Janet': '李宜臻', 'PAN': '潘美怡',
+            '茹津': '許茹津', '敏佳': '陳敏佳', '阿溫': '劉蕙慈',
+            'Stacy': '陳姿羽', 'Kerry': '侯渝琪', '小麥': '吳佳香',
+            '妮佛': '陳敬文', '小智': '林宜萱'
+        };
+
+        // Department mapping — ONLY real names (authoritative source: 明細總表)
         const EMPLOYEE_DEPT_MAP = {
-            // Real names (from 全體當月統整 → 明細總表)
             '余凱紓': '後勤部', '李宜臻': '企劃部', '潘美怡': '後勤部',
             '許茹津': '商品開發部', '劉蕙慈': '企劃部', '陳姿羽': '管理部',
             '侯渝琪': '商品商發部', '吳佳香': '銷售部', '陳敏佳': '企劃部',
-            '林宜萱': '後勤部', '陳敬文': '後勤部',
-            // Nicknames (from 員工個人逐月紀錄) — best-effort mapping
-            '小麥': '後勤部', '小智': '管理部', '妮佛': '管理部',
-            '阿溫': '商品商發部', '茹津': '商品開發部', '敏佳': '企劃部',
-            'Janet': '企劃部', 'Kate': '企劃部', 'Kerry': '商品開發部',
-            'PAN': '後勤部', 'Stacy': '銷售部'
+            '林宜萱': '後勤部', '陳敬文': '後勤部'
+        };
+
+        // Normalize any name (nickname or real) to canonical real name
+        const normalizeEmployeeName = (name) => {
+            const n = (name || '').trim();
+            if (!n) return n;
+            return NICKNAME_TO_REAL[n] || n;
         };
 
         // Known IP names (from 選單來源 sheet) — used to classify cross-tab items
@@ -621,72 +636,34 @@
             return m ? parseInt(m[1]) : new Date().getFullYear();
         };
 
-        // Parse all-staff file — prefer 明細總表 sheet (detailed rows), fallback to cross-tab
+        // Parse all-staff file — 明細總表 ONLY (cross-tab removed: unreliable sheet names)
         const parseAllStaffFile = (workbook, filename) => {
             const fileYear = extractYearFromFilename(filename);
             const monthMatch = filename.match(/(\d{4})年(\d{1,2})月/);
             const fileMonthNum = monthMatch ? parseInt(monthMatch[2]) : 1;
-            const defaultMonthStr = `${fileYear}-${String(fileMonthNum).padStart(2, '0')}`;
+            const fileMonthStr = `${fileYear}-${String(fileMonthNum).padStart(2, '0')}`;
 
-            // --- Strategy 1: Parse 明細總表 (detailed log rows) ---
-            if (workbook.SheetNames.includes('明細總表')) {
-                const ws = workbook.Sheets['明細總表'];
-                const rows = XLSX.utils.sheet_to_json(ws, { header: 1, defval: '' });
-                if (rows.length > 1) {
-                    const records = parseDetailSheet(rows, fileYear, defaultMonthStr);
-                    if (records.length > 0) return records;
-                }
+            if (!workbook.SheetNames.includes('明細總表')) {
+                console.warn(`All-staff file ${filename}: no 明細總表 sheet, skipping`);
+                return [];
             }
 
-            // --- Strategy 2: Parse cross-tab sheet (YYYY_MM) ---
-            const allRecords = [];
-            for (const sheetName of workbook.SheetNames) {
-                const ymMatch = sheetName.match(/^(\d{4})[_\-](\d{1,2})$/);
-                if (!ymMatch) continue;
-                const year = parseInt(ymMatch[1]);
-                const monthNum = parseInt(ymMatch[2]);
-                const monthStr = `${year}-${String(monthNum).padStart(2, '0')}`;
-                const ws = workbook.Sheets[sheetName];
-                const rows = XLSX.utils.sheet_to_json(ws, { header: 1, defval: '' });
-                if (rows.length < 2) continue;
-                const headers = rows[0].map(h => String(h).trim());
-                if (headers[0] !== '工作內容說明') continue;
-                const employeeNames = headers.slice(1).filter(n => n && n !== '');
-                for (let i = 1; i < rows.length; i++) {
-                    const row = rows[i];
-                    const task = String(row[0] || '').trim();
-                    if (!task || /^(合計|總計|小計|Total|total|SUM)$/i.test(task)) continue;
-                    for (let j = 0; j < employeeNames.length; j++) {
-                        const empName = employeeNames[j];
-                        const hours = parseFloat(row[j + 1]) || 0;
-                        if (hours <= 0) continue;
-                        const taskIsIP = isKnownIP(task);
-                        allRecords.push({
-                            name: empName,
-                            dept: EMPLOYEE_DEPT_MAP[empName] || '未分類',
-                            date: `${year}-${String(monthNum).padStart(2, '0')}-01`,
-                            task: task,
-                            ipProject: taskIsIP ? task : '非授權IP',
-                            workType: taskIsIP ? 'IP相關作業' : task,
-                            hours: hours,
-                            month: monthStr
-                        });
-                    }
-                }
-            }
-            return allRecords;
+            const ws = workbook.Sheets['明細總表'];
+            const rows = XLSX.utils.sheet_to_json(ws, { header: 1, defval: '' });
+            if (rows.length < 2) return [];
+
+            return parseDetailSheet(rows, fileYear, fileMonthStr);
         };
 
-        // Parse 明細總表 format:
-        // 員工姓名(A), 部門(B), 日期(C), 應上下班時段(D), 工作開始時間(E),
-        // 工作結束時間(F), 總工作時段(G), 工作內容說明(H), 實際時數(I)
-        const parseDetailSheet = (rows, fileYear, defaultMonthStr) => {
-            // Find header row
+        // Parse 明細總表 — flexible header detection for multiple layouts:
+        // Layout A (2025-09/10, 2026-01): 員工姓名, 部門, 日期, 應上下班時段, 工作開始/結束時間, 總工作時段, 工作內容說明, 實際時數
+        // Layout B (2026-02): 員工姓名, 日期, 星期, 授權IP, 工作項目, (empty), (empty), 實際時數
+        const parseDetailSheet = (rows, fileYear, fileMonthStr) => {
+            // Find header row — search first 10 rows for one containing '員工姓名'
             let headerIdx = -1;
-            for (let i = 0; i < Math.min(5, rows.length); i++) {
+            for (let i = 0; i < Math.min(10, rows.length); i++) {
                 const row = rows[i];
-                if (row && row.some(c => String(c).trim() === '員工姓名') &&
-                    row.some(c => String(c).trim() === '工作內容說明')) {
+                if (row && row.some(c => String(c).trim() === '員工姓名')) {
                     headerIdx = i;
                     break;
                 }
@@ -699,12 +676,25 @@
                 if (h === '員工姓名' && col.name === undefined) col.name = i;
                 if (h === '部門') col.dept = i;
                 if (h === '日期') col.date = i;
+                if (h === '星期') col.weekday = i;
                 if (h === '授權IP') col.ip = i;
-                if (h === '工作內容說明' && col.task === undefined) col.task = i;
+                // Accept both '工作內容說明' and '工作項目'
+                if ((h === '工作內容說明' || h === '工作項目') && col.task === undefined) col.task = i;
                 if (h === '實際時數' && col.hours === undefined) col.hours = i;
             });
 
-            if (col.task === undefined || col.hours === undefined) return [];
+            // Must have at least name + some task/hours columns
+            if (col.name === undefined) return [];
+            // Fallback: if no task column found, try col after IP or weekday
+            if (col.task === undefined) {
+                // Try positional: task is usually at index 4 or after 授權IP
+                if (col.ip !== undefined) col.task = col.ip + 1;
+                else col.task = 3;
+            }
+            if (col.hours === undefined) {
+                // Try to find the last numeric-looking header or use index 7
+                col.hours = headers.length >= 8 ? 7 : headers.length - 1;
+            }
 
             const records = [];
             let lastEmployee = '', lastDept = '', lastDateStr = '', lastIp = '';
@@ -713,12 +703,14 @@
                 const row = rows[i];
                 if (!row || row.length === 0) continue;
 
-                // Employee name — carry forward if empty
+                // Employee name — carry forward if empty, normalize to real name
                 const empRaw = col.name !== undefined ? String(row[col.name] || '').trim() : '';
-                if (empRaw) lastEmployee = empRaw;
+                if (empRaw && !/^(合計|總計|小計)/.test(empRaw)) lastEmployee = normalizeEmployeeName(empRaw);
                 if (!lastEmployee) continue;
+                // Skip summary rows
+                if (/^(合計|總計|小計)/.test(empRaw)) continue;
 
-                // Department — carry forward if empty
+                // Department — carry forward; fallback to EMPLOYEE_DEPT_MAP
                 const deptRaw = col.dept !== undefined ? String(row[col.dept] || '').trim() : '';
                 if (deptRaw) lastDept = deptRaw;
                 const dept = lastDept || EMPLOYEE_DEPT_MAP[lastEmployee] || '未分類';
@@ -727,7 +719,7 @@
                 const ipRaw = col.ip !== undefined ? String(row[col.ip] || '').trim() : '';
                 if (ipRaw) lastIp = ipRaw;
 
-                // Date — carry forward if empty; parse "2026/01/02（四）" or serial
+                // Date — carry forward if empty
                 const dateRaw = col.date !== undefined ? row[col.date] : '';
                 if (dateRaw !== '' && dateRaw !== null && dateRaw !== undefined) {
                     const parsed = parseDateValue(dateRaw, fileYear);
@@ -735,39 +727,46 @@
                 }
                 if (!lastDateStr) continue;
 
-                // Task (workType)
+                // Task
                 const task = String(row[col.task] || '').trim();
                 if (!task || task === '無資料') continue;
-                // Skip summary/total rows
                 if (/^(合計|總計|小計|Total|total|SUM)$/i.test(task)) continue;
-                if (/^(合計|總計|小計)/.test(lastEmployee)) continue;
 
-                // Classify IP vs workType — always check task against known IP list
+                // IP classification
                 const taskIsIP = isKnownIP(task);
                 let ipProject;
                 if (col.ip !== undefined && lastIp) {
-                    // Has explicit IP column with data
                     ipProject = lastIp;
                 } else if (taskIsIP) {
-                    // Task itself is an IP name (cross-tab or empty IP column)
                     ipProject = task;
                 } else {
                     ipProject = '非授權IP';
                 }
-                // workType: never use IP name as work type
                 const workType = taskIsIP ? 'IP相關作業' : task;
 
                 // Hours
                 const hours = parseFloat(row[col.hours]) || 0;
                 if (hours <= 0) continue;
 
+                // CRITICAL: Use fileMonthStr (from filename) as authoritative month
+                // because 11月/12月 files have wrong dates (all show 2025-10)
                 const dateMatch = lastDateStr.match(/^(\d{4})-(\d{2})/);
-                const month = dateMatch ? `${dateMatch[1]}-${dateMatch[2]}` : defaultMonthStr;
+                const dataMonth = dateMatch ? `${dateMatch[1]}-${dateMatch[2]}` : null;
+                // If data month differs from filename month, trust filename
+                const month = fileMonthStr || dataMonth || `${fileYear}-01`;
+
+                // Also fix the date to use the correct month from filename
+                let correctedDate = lastDateStr;
+                if (fileMonthStr && dataMonth && dataMonth !== fileMonthStr) {
+                    // Replace YYYY-MM in the date with the filename month
+                    const dayPart = lastDateStr.slice(7); // "-DD"
+                    correctedDate = fileMonthStr + dayPart;
+                }
 
                 records.push({
                     name: lastEmployee,
                     dept: dept,
-                    date: lastDateStr,
+                    date: correctedDate,
                     task: task,
                     ipProject: ipProject,
                     workType: workType,
@@ -807,25 +806,23 @@
                         const data = new Uint8Array(e.target.result);
                         const workbook = XLSX.read(data, { type: 'array', cellDates: false });
 
-                        // --- FORMAT DETECTION ---
-                        // All-staff file: "Fandora工作日誌_2026年01月" → parse 明細總表 or cross-tab
+                        // All-staff file → 明細總表 only
                         if (isAllStaffFile(filename)) {
-                            const records = parseAllStaffFile(workbook, filename);
-                            resolve(records);
+                            resolve(parseAllStaffFile(workbook, filename));
                             return;
                         }
 
-                        // --- Individual employee format ---
+                        // Individual employee file → iterate month sheets
                         const employeeName = extractEmployeeName(filename);
                         const fileYear = extractYearFromFilename(filename);
-                        const dept = (employeeName && EMPLOYEE_DEPT_MAP[employeeName]) || '未分類';
+                        const realName = normalizeEmployeeName(employeeName);
+                        const dept = EMPLOYEE_DEPT_MAP[realName] || '未分類';
 
                         const allRecords = [];
 
-                        // Iterate through all month sheets (1月, 2月, ... 12月)
                         for (const sheetName of workbook.SheetNames) {
                             const monthMatch = sheetName.match(/^(\d{1,2})月$/);
-                            if (!monthMatch) continue; // skip non-month sheets
+                            if (!monthMatch) continue;
 
                             const monthNum = parseInt(monthMatch[1]);
                             const monthStr = `${fileYear}-${String(monthNum).padStart(2, '0')}`;
@@ -834,27 +831,6 @@
                             const rows = XLSX.utils.sheet_to_json(worksheet, { header: 1, defval: '' });
 
                             const records = parseWorkLogRows(rows, employeeName, dept, monthStr, fileYear, monthNum);
-                            allRecords.push(...records);
-                        }
-
-                        // If no month sheets found, try the first sheet as fallback
-                        // But only if this is NOT an all-staff file (already handled above)
-                        if (allRecords.length === 0 && workbook.SheetNames.length > 0) {
-                            // Secondary detection: check if this is an all-staff file by sheet content
-                            if (workbook.SheetNames.includes('明細總表') ||
-                                workbook.SheetNames.some(s => /^\d{4}[_\-]\d{1,2}$/.test(s))) {
-                                const records = parseAllStaffFile(workbook, filename);
-                                if (records.length > 0) { resolve(records); return; }
-                            }
-                            const firstSheet = workbook.Sheets[workbook.SheetNames[0]];
-                            const firstRows = XLSX.utils.sheet_to_json(firstSheet, { header: 1, defval: '' });
-
-                            const rows = firstRows;
-                            const monthMatch = filename.match(/(\d{4})年(\d{1,2})月/);
-                            const monthStr = monthMatch
-                                ? `${monthMatch[1]}-${String(parseInt(monthMatch[2])).padStart(2, '0')}`
-                                : `${fileYear}-01`;
-                            const records = parseWorkLogRows(rows, employeeName, dept, monthStr, fileYear, null);
                             allRecords.push(...records);
                         }
 
@@ -868,28 +844,48 @@
         };
 
         // Individual format: 日期(0), 星期(1), 授權IP(2), 工作項目(3), 開始(4), 結束(5), 實際時數(6)
-        // KEY FIX: continuation rows have empty date — carry forward the last valid date
+        // Handles: "z" instead of "日期" (小智's sheet), carry-forward dates, name normalization
         const parseWorkLogRows = (rows, employeeName, dept, defaultMonth, fileYear, sheetMonth) => {
             if (rows.length < 2) return [];
 
-            // Find header row
-            let headerIdx = 0;
-            for (let i = 0; i < Math.min(5, rows.length); i++) {
+            // Normalize employee name to real name
+            const realName = normalizeEmployeeName(employeeName);
+            const realDept = EMPLOYEE_DEPT_MAP[realName] || dept || '未分類';
+
+            // Find header row — look for '日期', '工作項目', '實際時數', or positional fallback
+            let headerIdx = -1;
+            for (let i = 0; i < Math.min(8, rows.length); i++) {
                 const row = rows[i];
-                if (row && row.some(cell => {
-                    const s = String(cell).trim();
-                    return s === '日期' || s === '工作項目' || s === '實際時數';
-                })) {
+                if (!row) continue;
+                const rowStr = row.map(c => String(c).trim());
+                // Match if row contains at least one known header keyword
+                if (rowStr.some(s => ['日期', '工作項目', '實際時數', '授權IP', '星期'].includes(s))) {
                     headerIdx = i;
                     break;
                 }
             }
 
+            // If no header found by keyword, use positional heuristic:
+            // Check if row 0 looks like a header (first cell is text, not a date/number)
+            if (headerIdx < 0) {
+                for (let i = 0; i < Math.min(5, rows.length); i++) {
+                    const row = rows[i];
+                    if (!row || row.length < 4) continue;
+                    const first = String(row[0]).trim().toLowerCase();
+                    // "z" is a known typo for "日期" in 小智's sheet
+                    if (first === 'z' || first === '日期' || /^[a-z\u4e00-\u9fff]/.test(first)) {
+                        headerIdx = i;
+                        break;
+                    }
+                }
+            }
+            if (headerIdx < 0) headerIdx = 0;
+
             const headers = rows[headerIdx] || [];
             const colIdx = {};
             headers.forEach((h, i) => {
                 const key = String(h).trim();
-                if (key === '日期') colIdx.date = i;
+                if (key === '日期' || key === 'z') colIdx.date = i;  // "z" = typo for 日期
                 if (key === '星期') colIdx.weekday = i;
                 if (key === '授權IP') colIdx.ip = i;
                 if (key === '工作項目') colIdx.task = i;
@@ -898,13 +894,13 @@
                 if (key === '實際時數') colIdx.hours = i;
             });
 
-            // Positional fallback only if headers not detected
+            // Positional fallback: standard layout is date(0), weekday(1), IP(2), task(3), start(4), end(5), hours(6)
             if (colIdx.date === undefined) colIdx.date = 0;
             if (colIdx.task === undefined) colIdx.task = 3;
             if (colIdx.hours === undefined) colIdx.hours = 6;
 
             const records = [];
-            let lastDateStr = null; // For carrying forward date to continuation rows
+            let lastDateStr = null;
 
             for (let i = headerIdx + 1; i < rows.length; i++) {
                 const row = rows[i];
@@ -912,40 +908,29 @@
 
                 // Skip template/example rows
                 const firstCell = String(row[colIdx.date] || '').trim();
-                if (/^範例/.test(firstCell)) continue;
-                if (firstCell === '日期') continue;
+                if (/^(範例|日期|z)$/i.test(firstCell)) continue;
 
-                // Parse date — use parseDateValue, carry forward for continuation rows
+                // Parse date
                 const dateRaw = row[colIdx.date];
                 let dateStr = null;
                 if (dateRaw !== '' && dateRaw !== null && dateRaw !== undefined) {
-                    if (typeof dateRaw === 'number') {
-                        if (dateRaw > 40000) {
-                            dateStr = excelDateToString(dateRaw);
-                        }
-                        // Small numbers (< 40000) could be M/D misread — try parseDateValue
+                    if (typeof dateRaw === 'number' && dateRaw > 40000) {
+                        dateStr = excelDateToString(dateRaw);
                     } else if (typeof dateRaw === 'string' && dateRaw.trim()) {
                         dateStr = parseDateValue(dateRaw, fileYear);
                     }
                 }
-
-                // Update or carry forward date
-                if (dateStr) {
-                    lastDateStr = dateStr;
-                }
-                // If no date and no previous date, skip
+                if (dateStr) lastDateStr = dateStr;
                 if (!lastDateStr) continue;
 
-                // Parse task (workType) — must be a text string, not a number
+                // Task
                 const taskRaw = row[colIdx.task];
                 const task = String(taskRaw || '').trim();
                 if (!task) continue;
-                // Skip summary/total rows
                 if (/^(合計|總計|小計|Total|total|SUM)$/i.test(task)) continue;
-                // Guard: skip if task looks like a pure number (time fraction or serial)
                 if (/^\d+\.?\d*$/.test(task) && parseFloat(task) < 100) continue;
 
-                // Parse ipProject (授權IP) — with known IP fallback
+                // IP classification
                 const ipRaw = colIdx.ip !== undefined ? String(row[colIdx.ip] || '').trim() : '';
                 const taskIsIPCheck = isKnownIP(task);
                 let ipProject;
@@ -956,27 +941,25 @@
                 } else {
                     ipProject = '非授權IP';
                 }
-                // workType: never use IP name as work type
                 const workType = taskIsIPCheck ? 'IP相關作業' : task;
 
-                // Parse hours
-                const hoursRaw = row[colIdx.hours];
-                const hours = parseFloat(hoursRaw) || 0;
+                // Hours
+                const hours = parseFloat(row[colIdx.hours]) || 0;
                 if (hours <= 0) continue;
 
-                // Derive month
+                // Month: use defaultMonth (derived from sheet name like "2月" → "2026-02")
                 const dm = lastDateStr.match(/^(\d{4})-(\d{2})/);
-                const month = dm ? `${dm[1]}-${dm[2]}` : defaultMonth;
+                const month = defaultMonth || (dm ? `${dm[1]}-${dm[2]}` : `${fileYear}-01`);
 
                 records.push({
-                    name: employeeName || '未知',
-                    dept: dept || '未分類',
+                    name: realName || '未知',
+                    dept: realDept,
                     date: lastDateStr,
                     task: task,
                     ipProject: ipProject,
                     workType: workType,
                     hours: hours,
-                    month: month || defaultMonth || `${fileYear}-01`
+                    month: month
                 });
             }
 
@@ -1078,58 +1061,92 @@
                 return spreadsheets;
             };
 
+            const fetchFileArrayBuffer = async (file) => {
+                let fileResponse;
+                if (file.mimeType === 'application/vnd.google-apps.spreadsheet') {
+                    fileResponse = await fetch(
+                        `https://www.googleapis.com/drive/v3/files/${file.id}/export?mimeType=application/vnd.openxmlformats-officedocument.spreadsheetml.sheet&key=${apiKey}`
+                    );
+                } else {
+                    fileResponse = await fetch(
+                        `https://www.googleapis.com/drive/v3/files/${file.id}?alt=media&key=${apiKey}&supportsAllDrives=true`
+                    );
+                }
+                if (!fileResponse.ok) throw new Error(`HTTP ${fileResponse.status}`);
+                return fileResponse.arrayBuffer();
+            };
+
             const fetchFilesFromGDrive = async (folderIdToUse, fileType) => {
                 setMessage({ type: 'info', text: '正在掃描資料夾結構，請稍候...' });
                 const files = await collectSpreadsheetFiles(folderIdToUse);
                 setMessage({ type: 'info', text: `找到 ${files.length} 個試算表檔案，正在載入...` });
                 const data = [];
 
-                for (const file of files) {
-                    try {
-                        let fileResponse;
-                        if (file.mimeType === 'application/vnd.google-apps.spreadsheet') {
-                            fileResponse = await fetch(
-                                `https://www.googleapis.com/drive/v3/files/${file.id}/export?mimeType=application/vnd.openxmlformats-officedocument.spreadsheetml.sheet&key=${apiKey}`
-                            );
-                        } else {
-                            fileResponse = await fetch(
-                                `https://www.googleapis.com/drive/v3/files/${file.id}?alt=media&key=${apiKey}&supportsAllDrives=true`
-                            );
-                        }
-                        if (!fileResponse.ok) {
-                            console.error(`Failed to download ${file.name}: ${fileResponse.status}`);
-                            continue;
-                        }
-                        const arrayBuffer = await fileResponse.arrayBuffer();
+                if (fileType === 'work') {
+                    // Separate all-staff vs individual files
+                    const allStaffFiles = files.filter(f => isAllStaffFile(f.name));
+                    const individualFiles = files.filter(f => !isAllStaffFile(f.name));
+                    const coveredMonths = new Set();
 
-                        if (fileType === 'work') {
+                    // Phase 1: All-staff files (authoritative — 明細總表 only, real names)
+                    for (const file of allStaffFiles) {
+                        try {
+                            setMessage({ type: 'info', text: `載入全體統整: ${file.name}...` });
+                            const arrayBuffer = await fetchFileArrayBuffer(file);
                             const mockFile = new File([arrayBuffer], file.name + '.xlsx');
                             const records = await parseWorkLogExcel(mockFile, file.name);
                             data.push(...records);
-                        } else if (fileType === 'salary') {
+                            records.forEach(r => { if (r.month) coveredMonths.add(r.month); });
+                            const months = [...new Set(records.map(r => r.month))].sort();
+                            const employees = [...new Set(records.map(r => r.name))].sort();
+                            console.log(`✅ All-staff: ${file.name} → ${records.length} records | months: ${months.join(',')} | employees: ${employees.join(',')}`);
+                        } catch (error) {
+                            console.error(`❌ All-staff failed: ${file.name}:`, error);
+                        }
+                    }
+
+                    // Phase 2: Individual files — ONLY for months NOT covered by all-staff
+                    for (const file of individualFiles) {
+                        try {
+                            const arrayBuffer = await fetchFileArrayBuffer(file);
+                            const mockFile = new File([arrayBuffer], file.name + '.xlsx');
+                            const records = await parseWorkLogExcel(mockFile, file.name);
+                            // Keep only records for uncovered months
+                            const newRecords = records.filter(r => !coveredMonths.has(r.month));
+                            if (newRecords.length > 0) {
+                                data.push(...newRecords);
+                                const months = [...new Set(newRecords.map(r => r.month))].sort();
+                                console.log(`✅ Individual: ${file.name} → ${newRecords.length} new records (months: ${months.join(',')}) | ${records.length - newRecords.length} skipped (covered)`);
+                            } else {
+                                console.log(`⏭️ Individual: ${file.name} → all ${records.length} records skipped (months covered by all-staff)`);
+                            }
+                        } catch (error) {
+                            console.error(`❌ Individual failed: ${file.name}:`, error);
+                        }
+                    }
+
+                    console.log(`\n📊 TOTAL: ${data.length} work records`);
+                    console.log(`📅 Covered months: ${[...coveredMonths].sort().join(', ')}`);
+                    const uniqueNames = [...new Set(data.map(r => r.name))].sort();
+                    console.log(`👥 Unique employees (${uniqueNames.length}): ${uniqueNames.join(', ')}`);
+
+                } else if (fileType === 'salary') {
+                    // Salary files — only parse files that actually contain a '薪資' sheet
+                    // Skip silently if no salary sheet found (avoids noise from work files in same folder)
+                    for (const file of files) {
+                        try {
+                            const arrayBuffer = await fetchFileArrayBuffer(file);
                             const mockFile = new File([arrayBuffer], file.name + '.xlsx');
                             const records = await parseSalaryExcel(mockFile);
                             data.push(...records);
-                        }
-                    } catch (error) {
-                        console.error(`Failed to parse ${file.name}:`, error);
-                    }
-                }
-                // Deduplicate: if both all-staff and individual files exist, same records appear twice
-                // Use composite key: name + date + task + hours
-                if (fileType === 'work' && data.length > 0) {
-                    const seen = new Set();
-                    const deduped = [];
-                    for (const rec of data) {
-                        // Round hours to 2 decimal places for consistent matching
-                        const key = `${rec.name}|${rec.date}|${rec.task}|${Math.round(rec.hours * 100)}`;
-                        if (!seen.has(key)) {
-                            seen.add(key);
-                            deduped.push(rec);
+                            console.log(`✅ Salary: ${file.name} → ${records.length} records`);
+                        } catch (error) {
+                            // Only log if it's NOT the expected "Sheet '薪資' not found" error
+                            if (!error.message.includes('薪資')) {
+                                console.error(`❌ Salary failed: ${file.name}:`, error);
+                            }
                         }
                     }
-                    console.log(`Dedup: ${data.length} → ${deduped.length} records (removed ${data.length - deduped.length} duplicates)`);
-                    return deduped;
                 }
                 return data;
             };
@@ -1174,19 +1191,9 @@
                 Promise.all(tasks)
                     .then(results => {
                         const allLogs = results.flat();
-                        // Deduplicate merged records
                         const merged = [...workLogs, ...allLogs];
-                        const seen = new Set();
-                        const deduped = [];
-                        for (const rec of merged) {
-                            const key = `${rec.name}|${rec.date}|${rec.task}|${Math.round(rec.hours * 100)}`;
-                            if (!seen.has(key)) {
-                                seen.add(key);
-                                deduped.push(rec);
-                            }
-                        }
-                        setWorkLogs(deduped);
-                        setMessage({ type: 'success', text: `成功导入 ${allLogs.length} 条工作记录（去重後共 ${deduped.length} 条）` });
+                        setWorkLogs(merged);
+                        setMessage({ type: 'success', text: `成功導入 ${allLogs.length} 條工作記錄（共 ${merged.length} 條）` });
                     })
                     .catch(error => {
                         setMessage({ type: 'error', text: `导入失败: ${error.message}` });
