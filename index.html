@@ -1351,6 +1351,26 @@
                 return Object.values(costs).sort((a, b) => b.cost - a.cost);
             }, [filteredLogs, monthlyCostMap]);
 
+            // WorkType cost allocation: same proportional logic
+            const workTypeCosts = useMemo(() => {
+                if (Object.keys(monthlyCostMap).length === 0) return {};
+                const monthTotalHours = {};
+                filteredLogs.forEach(log => {
+                    if (!monthTotalHours[log.month]) monthTotalHours[log.month] = 0;
+                    monthTotalHours[log.month] += log.hours;
+                });
+                const costs = {};
+                filteredLogs.forEach(log => {
+                    const wt = log.task || '未分類';
+                    if (!costs[wt]) costs[wt] = { cost: 0, hours: 0 };
+                    costs[wt].hours += log.hours;
+                    const mCost = monthlyCostMap[log.month] || 0;
+                    const mHours = monthTotalHours[log.month] || 1;
+                    costs[wt].cost += (log.hours / mHours) * mCost;
+                });
+                return costs;
+            }, [filteredLogs, monthlyCostMap]);
+
             // Department cost allocation: same proportional logic
             const deptCosts = useMemo(() => {
                 if (Object.keys(monthlyCostMap).length === 0) return [];
@@ -1858,6 +1878,25 @@
                         {/* Projects Tab */}
                         {activeTab === 'projects' && (
                             <div>
+                                {projectCosts.length > 0 && (
+                                    <div className="kpi-grid" style={{marginBottom: '16px'}}>
+                                        <div className="kpi-card">
+                                            <div className="kpi-label">專案總費用</div>
+                                            <div className="kpi-value">${Math.round(projectCosts.reduce((s,c) => s + c.cost, 0)).toLocaleString()}</div>
+                                            <div className="kpi-unit">NTD</div>
+                                        </div>
+                                        <div className="kpi-card">
+                                            <div className="kpi-label">最高費用專案</div>
+                                            <div className="kpi-value" style={{fontSize: '16px'}}>{projectCosts[0]?.name}</div>
+                                            <div className="kpi-unit">${Math.round(projectCosts[0]?.cost || 0).toLocaleString()}</div>
+                                        </div>
+                                        <div className="kpi-card">
+                                            <div className="kpi-label">平均專案費用</div>
+                                            <div className="kpi-value">${Math.round(projectCosts.reduce((s,c) => s + c.cost, 0) / projectCosts.length).toLocaleString()}</div>
+                                            <div className="kpi-unit">NTD</div>
+                                        </div>
+                                    </div>
+                                )}
                                 <div className="toolbar">
                                     <div className="toolbar-group">
                                         <label className="toolbar-label">專案：</label>
@@ -1963,21 +2002,28 @@
                                                 <tr>
                                                     <th>授權IP</th>
                                                     <th>總工時</th>
+                                                    {projectCosts.length > 0 && <th>分攤費用</th>}
+                                                    {projectCosts.length > 0 && <th>時薪成本</th>}
                                                     <th>參與員工</th>
                                                     <th>部門數</th>
                                                     <th>工作項目數</th>
                                                 </tr>
                                             </thead>
                                             <tbody>
-                                                {projectStats.map((p, idx) => (
+                                                {projectStats.map((p, idx) => {
+                                                    const pc = projectCosts.find(c => c.name === p.name);
+                                                    return (
                                                     <tr key={idx}>
                                                         <td>{p.name}</td>
                                                         <td>{p.hours.toFixed(2)}</td>
+                                                        {projectCosts.length > 0 && <td>${pc ? Math.round(pc.cost).toLocaleString() : '-'}</td>}
+                                                        {projectCosts.length > 0 && <td>${pc && pc.hours > 0 ? Math.round(pc.cost / pc.hours).toLocaleString() : '-'}</td>}
                                                         <td>{p.employeeCount}</td>
                                                         <td>{p.deptCount}</td>
                                                         <td>{p.workTypeCount}</td>
                                                     </tr>
-                                                ))}
+                                                    );
+                                                })}
                                             </tbody>
                                         </table>
                                     </div>
@@ -2006,6 +2052,29 @@
                         {/* Work Types Tab */}
                         {activeTab === 'workTypes' && (
                             <div>
+                                {Object.keys(workTypeCosts).length > 0 && (() => {
+                                    const sortedWTC = Object.entries(workTypeCosts).sort((a,b) => b[1].cost - a[1].cost);
+                                    const totalWTCost = sortedWTC.reduce((s,[,v]) => s + v.cost, 0);
+                                    return (
+                                    <div className="kpi-grid" style={{marginBottom: '16px'}}>
+                                        <div className="kpi-card">
+                                            <div className="kpi-label">工作項目總費用</div>
+                                            <div className="kpi-value">${Math.round(totalWTCost).toLocaleString()}</div>
+                                            <div className="kpi-unit">NTD</div>
+                                        </div>
+                                        <div className="kpi-card">
+                                            <div className="kpi-label">最高費用項目</div>
+                                            <div className="kpi-value" style={{fontSize: '16px'}}>{sortedWTC[0]?.[0]}</div>
+                                            <div className="kpi-unit">${Math.round(sortedWTC[0]?.[1]?.cost || 0).toLocaleString()}</div>
+                                        </div>
+                                        <div className="kpi-card">
+                                            <div className="kpi-label">項目數量</div>
+                                            <div className="kpi-value">{sortedWTC.length}</div>
+                                            <div className="kpi-unit">個</div>
+                                        </div>
+                                    </div>
+                                    );
+                                })()}
                                 <div className="toolbar-group" style={{marginBottom: '16px'}}>
                                     <label className="toolbar-label">工作項目：</label>
                                     <select value={selectedWorkType} onChange={(e) => setSelectedWorkType(e.target.value)}>
@@ -2025,21 +2094,28 @@
                                                     <tr>
                                                         <th>工作項目</th>
                                                         <th>工時</th>
+                                                        {Object.keys(workTypeCosts).length > 0 && <th>分攤費用</th>}
+                                                        {Object.keys(workTypeCosts).length > 0 && <th>時薪成本</th>}
                                                         <th>參與人數</th>
                                                         <th>涉及部門</th>
                                                         <th>相關授權IP</th>
                                                     </tr>
                                                 </thead>
                                                 <tbody>
-                                                    {selectedWorkTypeData.map((wt, idx) => (
+                                                    {selectedWorkTypeData.map((wt, idx) => {
+                                                        const wc = workTypeCosts[wt.name];
+                                                        return (
                                                         <tr key={idx}>
                                                             <td>{wt.name}</td>
                                                             <td>{wt.hours.toFixed(2)}</td>
+                                                            {Object.keys(workTypeCosts).length > 0 && <td>${wc ? Math.round(wc.cost).toLocaleString() : '-'}</td>}
+                                                            {Object.keys(workTypeCosts).length > 0 && <td>${wc && wc.hours > 0 ? Math.round(wc.cost / wc.hours).toLocaleString() : '-'}</td>}
                                                             <td>{wt.employeeCount}</td>
                                                             <td>{wt.deptCount}</td>
                                                             <td>{wt.ipCount}</td>
                                                         </tr>
-                                                    ))}
+                                                        );
+                                                    })}
                                                 </tbody>
                                             </table>
                                         </div>
@@ -2227,6 +2303,25 @@
                         {/* Departments Tab */}
                         {activeTab === 'departments' && (
                             <div>
+                                {deptCosts.length > 0 && (
+                                    <div className="kpi-grid" style={{marginBottom: '16px'}}>
+                                        <div className="kpi-card">
+                                            <div className="kpi-label">部門總費用</div>
+                                            <div className="kpi-value">${Math.round(deptCosts.reduce((s,c) => s + c.cost, 0)).toLocaleString()}</div>
+                                            <div className="kpi-unit">NTD</div>
+                                        </div>
+                                        <div className="kpi-card">
+                                            <div className="kpi-label">最高費用部門</div>
+                                            <div className="kpi-value" style={{fontSize: '16px'}}>{deptCosts[0]?.name}</div>
+                                            <div className="kpi-unit">${Math.round(deptCosts[0]?.cost || 0).toLocaleString()}</div>
+                                        </div>
+                                        <div className="kpi-card">
+                                            <div className="kpi-label">平均人均費用</div>
+                                            <div className="kpi-value">${Math.round(deptCosts.reduce((s,c) => s + c.cost, 0) / deptCosts.reduce((s,c) => s + c.memberCount, 0)).toLocaleString()}</div>
+                                            <div className="kpi-unit">NTD/人</div>
+                                        </div>
+                                    </div>
+                                )}
                                 <div className="toolbar">
                                     <div className="toolbar-group">
                                         <label className="toolbar-label">部門：</label>
@@ -2328,19 +2423,26 @@
                                                     <tr>
                                                         <th>部門</th>
                                                         <th>總工時</th>
+                                                        {deptCosts.length > 0 && <th>分攤費用</th>}
+                                                        {deptCosts.length > 0 && <th>人均費用</th>}
                                                         <th>成員數</th>
                                                         <th>平均工時</th>
                                                     </tr>
                                                 </thead>
                                                 <tbody>
-                                                    {deptStats.map((d, idx) => (
+                                                    {deptStats.map((d, idx) => {
+                                                        const dc = deptCosts.find(c => c.name === d.name);
+                                                        return (
                                                         <tr key={idx}>
                                                             <td>{d.name}</td>
                                                             <td>{d.hours.toFixed(2)}</td>
+                                                            {deptCosts.length > 0 && <td>${dc ? Math.round(dc.cost).toLocaleString() : '-'}</td>}
+                                                            {deptCosts.length > 0 && <td>${dc ? Number(dc.avgCostPerMember).toLocaleString() : '-'}</td>}
                                                             <td>{d.memberCount}</td>
                                                             <td>{d.avgPerMember}</td>
                                                         </tr>
-                                                    ))}
+                                                        );
+                                                    })}
                                                 </tbody>
                                             </table>
                                         </div>
