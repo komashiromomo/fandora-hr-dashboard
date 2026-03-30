@@ -655,7 +655,7 @@
                 for (let i = 1; i < rows.length; i++) {
                     const row = rows[i];
                     const task = String(row[0] || '').trim();
-                    if (!task || task === '合計' || task === '總計' || task === 'Total') continue;
+                    if (!task || /^(合計|總計|小計|Total|total|SUM)$/i.test(task)) continue;
                     for (let j = 0; j < employeeNames.length; j++) {
                         const empName = employeeNames[j];
                         const hours = parseFloat(row[j + 1]) || 0;
@@ -738,6 +738,9 @@
                 // Task (workType)
                 const task = String(row[col.task] || '').trim();
                 if (!task || task === '無資料') continue;
+                // Skip summary/total rows
+                if (/^(合計|總計|小計|Total|total|SUM)$/i.test(task)) continue;
+                if (/^(合計|總計|小計)/.test(lastEmployee)) continue;
 
                 // Classify IP vs workType — always check task against known IP list
                 const taskIsIP = isKnownIP(task);
@@ -937,6 +940,8 @@
                 const taskRaw = row[colIdx.task];
                 const task = String(taskRaw || '').trim();
                 if (!task) continue;
+                // Skip summary/total rows
+                if (/^(合計|總計|小計|Total|total|SUM)$/i.test(task)) continue;
                 // Guard: skip if task looks like a pure number (time fraction or serial)
                 if (/^\d+\.?\d*$/.test(task) && parseFloat(task) < 100) continue;
 
@@ -1110,6 +1115,22 @@
                         console.error(`Failed to parse ${file.name}:`, error);
                     }
                 }
+                // Deduplicate: if both all-staff and individual files exist, same records appear twice
+                // Use composite key: name + date + task + hours
+                if (fileType === 'work' && data.length > 0) {
+                    const seen = new Set();
+                    const deduped = [];
+                    for (const rec of data) {
+                        // Round hours to 2 decimal places for consistent matching
+                        const key = `${rec.name}|${rec.date}|${rec.task}|${Math.round(rec.hours * 100)}`;
+                        if (!seen.has(key)) {
+                            seen.add(key);
+                            deduped.push(rec);
+                        }
+                    }
+                    console.log(`Dedup: ${data.length} → ${deduped.length} records (removed ${data.length - deduped.length} duplicates)`);
+                    return deduped;
+                }
                 return data;
             };
 
@@ -1153,8 +1174,19 @@
                 Promise.all(tasks)
                     .then(results => {
                         const allLogs = results.flat();
-                        setWorkLogs([...workLogs, ...allLogs]);
-                        setMessage({ type: 'success', text: `成功导入 ${allLogs.length} 条工作记录` });
+                        // Deduplicate merged records
+                        const merged = [...workLogs, ...allLogs];
+                        const seen = new Set();
+                        const deduped = [];
+                        for (const rec of merged) {
+                            const key = `${rec.name}|${rec.date}|${rec.task}|${Math.round(rec.hours * 100)}`;
+                            if (!seen.has(key)) {
+                                seen.add(key);
+                                deduped.push(rec);
+                            }
+                        }
+                        setWorkLogs(deduped);
+                        setMessage({ type: 'success', text: `成功导入 ${allLogs.length} 条工作记录（去重後共 ${deduped.length} 条）` });
                     })
                     .catch(error => {
                         setMessage({ type: 'error', text: `导入失败: ${error.message}` });
@@ -1684,13 +1716,14 @@
                                                         dataKey="hours"
                                                         nameKey="name"
                                                         outerRadius={80}
-                                                        label
+                                                        label={({name, percent}) => `${name} ${(percent * 100).toFixed(0)}%`}
                                                     >
                                                         {projectHours.map((_, index) => (
                                                             <Cell key={index} fill={COLORS[index % COLORS.length]} />
                                                         ))}
                                                     </Pie>
-                                                    <Tooltip />
+                                                    <Tooltip formatter={(value) => `${value.toFixed(1)}h`} />
+                                                    <Legend />
                                                 </PieChart>
                                             </ResponsiveContainer>
                                         </div>
@@ -1853,13 +1886,14 @@
                                                             dataKey="hours"
                                                             nameKey="name"
                                                             outerRadius={80}
-                                                            label
+                                                            label={({name, percent}) => `${name} ${(percent * 100).toFixed(0)}%`}
                                                         >
                                                             {selectedProjectData[0].depts.map((_, index) => (
                                                                 <Cell key={index} fill={COLORS[index % COLORS.length]} />
                                                             ))}
                                                         </Pie>
-                                                        <Tooltip />
+                                                        <Tooltip formatter={(value) => `${value.toFixed(1)}h`} />
+                                                        <Legend />
                                                     </PieChart>
                                                 </ResponsiveContainer>
                                             </div>
@@ -2032,13 +2066,14 @@
                                                                 dataKey="hours"
                                                                 nameKey="name"
                                                                 outerRadius={80}
-                                                                label
+                                                                label={({name, percent}) => `${name} ${(percent * 100).toFixed(0)}%`}
                                                             >
                                                                 {_.take(selectedEmployeeData[0].tasks, 10).map((_, index) => (
                                                                     <Cell key={index} fill={COLORS[index % COLORS.length]} />
                                                                 ))}
                                                             </Pie>
-                                                            <Tooltip />
+                                                            <Tooltip formatter={(value) => `${value.toFixed(1)}h`} />
+                                                            <Legend />
                                                         </PieChart>
                                                     </ResponsiveContainer>
                                                 </div>
@@ -2223,13 +2258,14 @@
                                                                     dataKey="hours"
                                                                     nameKey="name"
                                                                     outerRadius={80}
-                                                                    label
+                                                                    label={({name, percent}) => `${name} ${(percent * 100).toFixed(0)}%`}
                                                                 >
                                                                     {_.take(selectedDeptData[0].tasks, 10).map((_, index) => (
                                                                         <Cell key={index} fill={COLORS[index % COLORS.length]} />
                                                                     ))}
                                                                 </Pie>
-                                                                <Tooltip />
+                                                                <Tooltip formatter={(value) => `${value.toFixed(1)}h`} />
+                                                                <Legend />
                                                             </PieChart>
                                                         </ResponsiveContainer>
                                                     </div>
