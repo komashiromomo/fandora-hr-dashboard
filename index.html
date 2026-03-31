@@ -1105,6 +1105,52 @@
         const GOOGLE_CLIENT_ID = '768263377217-sg98j6ktnvnq28hh0b4ak0vs3ajg005p.apps.googleusercontent.com';
         const ALLOWED_DOMAIN = 'fandora.co';
         const AUTH_STORAGE_KEY = 'fandora_auth_user';
+        const PERM_CACHE_KEY = 'fandora_perm_role';
+        const PERM_SHEET_ID = '1b8zksLcjP7yVu7YlgGh40olHPHw1HjMdUueM7HAAv7I';
+        const DEFAULT_ROLE = 'member';
+
+        // Role → visible tabs mapping
+        const ROLE_TABS = {
+            admin: ['overview', 'projects', 'workTypes', 'employees', 'departments', 'settings'],
+            member: ['overview', 'projects', 'workTypes', 'departments'],
+        };
+
+        // Fetch role from the dedicated permission Google Sheet
+        const fetchUserRole = async (email, apiKey) => {
+            try {
+                // Use Drive API to export the permission sheet as CSV
+                const url = `https://www.googleapis.com/drive/v3/files/${PERM_SHEET_ID}/export?mimeType=text/csv&key=${apiKey}`;
+                let resp = await fetch(url);
+                if (!resp.ok) {
+                    console.warn('Permission sheet fetch failed:', resp.statusText);
+                    return DEFAULT_ROLE;
+                }
+                const csv = await resp.text();
+                const rows = csv.split('\n').map(r => {
+                    const cells = [];
+                    let current = '';
+                    let inQuotes = false;
+                    for (let i = 0; i < r.length; i++) {
+                        const ch = r[i];
+                        if (ch === '"') { inQuotes = !inQuotes; }
+                        else if (ch === ',' && !inQuotes) { cells.push(current.trim()); current = ''; }
+                        else { current += ch; }
+                    }
+                    cells.push(current.trim());
+                    return cells;
+                });
+                // Find row matching email (skip header row 0)
+                for (let i = 1; i < rows.length; i++) {
+                    if (rows[i][0] && rows[i][0].toLowerCase() === email.toLowerCase()) {
+                        return (rows[i][1] || DEFAULT_ROLE).toLowerCase().trim();
+                    }
+                }
+                return DEFAULT_ROLE;
+            } catch (e) {
+                console.warn('Permission fetch failed, defaulting to member:', e);
+                return DEFAULT_ROLE;
+            }
+        };
 
         const parseJwt = (token) => {
             try {
@@ -1194,9 +1240,9 @@
                     const saved = localStorage.getItem(AUTH_STORAGE_KEY);
                     if (saved) {
                         const u = JSON.parse(saved);
-                        // Check if token expired
                         if (u.exp && u.exp * 1000 < Date.now()) {
                             localStorage.removeItem(AUTH_STORAGE_KEY);
+                            localStorage.removeItem(PERM_CACHE_KEY);
                             return null;
                         }
                         return u;
@@ -1204,24 +1250,54 @@
                 } catch(e) {}
                 return null;
             });
+            const [role, setRole] = useState(() => {
+                try { return localStorage.getItem(PERM_CACHE_KEY) || null; } catch(e) { return null; }
+            });
+            const [roleLoading, setRoleLoading] = useState(false);
+
+            // Load role when user logs in
+            useEffect(() => {
+                if (user && !role) {
+                    setRoleLoading(true);
+                    const apiKey = localStorage.getItem('gdrive_api_key') || 'AIzaSyA2yafCAMqILEEda1FUVFsGXd2utGr1_0Y';
+                    fetchUserRole(user.email, apiKey).then(r => {
+                        setRole(r);
+                        try { localStorage.setItem(PERM_CACHE_KEY, r); } catch(e) {}
+                        setRoleLoading(false);
+                    });
+                }
+            }, [user, role]);
 
             const handleLogout = () => {
                 localStorage.removeItem(AUTH_STORAGE_KEY);
+                localStorage.removeItem(PERM_CACHE_KEY);
                 if (window.google?.accounts?.id) {
                     window.google.accounts.id.disableAutoSelect();
                 }
                 setUser(null);
+                setRole(null);
             };
 
             if (!user) {
                 return React.createElement(LoginScreen, { onLogin: setUser });
             }
 
-            return React.createElement(FandoraDashboard, { authUser: user, onLogout: handleLogout });
+            if (roleLoading || !role) {
+                return React.createElement('div', { className: 'login-screen' },
+                    React.createElement('div', { className: 'login-card' },
+                        React.createElement('div', { className: 'login-logo' }, '\uD83D\uDD12'),
+                        React.createElement('h1', { className: 'login-title' }, '\u6B0A\u9650\u9A57\u8B49\u4E2D...'),
+                        React.createElement('p', { className: 'login-subtitle' }, '\u6B63\u5728\u78BA\u8A8D\u60A8\u7684\u5B58\u53D6\u6B0A\u9650')
+                    )
+                );
+            }
+
+            return React.createElement(FandoraDashboard, { authUser: user, userRole: role, onLogout: handleLogout });
         };
 
         // Main Dashboard Component
-        const FandoraDashboard = ({ authUser, onLogout }) => {
+        const FandoraDashboard = ({ authUser, userRole, onLogout }) => {
+            const allowedTabs = ROLE_TABS[userRole] || ROLE_TABS[DEFAULT_ROLE];
             const [activeTab, setActiveTab] = useState('overview');
             const [workLogs, setWorkLogs] = useState([]);
             const [salaryData, setSalaryData] = useState([]);
@@ -1914,6 +1990,7 @@
                             <div className="user-bar">
                                 {authUser && authUser.picture && <img src={authUser.picture} className="user-avatar" referrerPolicy="no-referrer" />}
                                 <span className="user-name">{authUser && authUser.name}</span>
+                                <span style={{fontSize:'11px',padding:'2px 8px',borderRadius:'4px',background: userRole === 'admin' ? 'rgba(0,188,212,0.3)' : 'rgba(255,255,255,0.15)',color: userRole === 'admin' ? '#00BCD4' : '#999'}}>{userRole === 'admin' ? '管理者' : '成員'}</span>
                                 <button className="logout-btn" onClick={onLogout}>登出</button>
                             </div>
                             <div className="header-title">Fandora</div>
@@ -1929,7 +2006,7 @@
                             { id: 'employees', label: '員工分析' },
                             { id: 'departments', label: '部門分析' },
                             { id: 'settings', label: '設定' }
-                        ].map(tab => (
+                        ].filter(tab => allowedTabs.includes(tab.id)).map(tab => (
                             <button
                                 key={tab.id}
                                 className={`nav-tab ${activeTab === tab.id ? 'active' : ''}`}
