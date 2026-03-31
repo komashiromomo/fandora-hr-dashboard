@@ -9,6 +9,7 @@
     <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
     <script src="https://cdn.sheetjs.com/xlsx-0.20.3/package/dist/xlsx.full.min.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/lodash.js/4.17.21/lodash.min.js"></script>
+    <script src="https://accounts.google.com/gsi/client" async defer></script>
     <script>
     (function(){
         var re=['useState','useEffect','useRef','useMemo','useCallback','useReducer','useContext','useLayoutEffect','useImperativeHandle','useDebugValue','useDeferredValue','useTransition','createElement','createContext','Fragment','Children','isValidElement','forwardRef','memo','cloneElement','Component','PureComponent','createRef','lazy','Suspense','startTransition','useId','useSyncExternalStore','version'];
@@ -33,6 +34,117 @@
                          "Noto Sans CJK TC", sans-serif;
             background-color: #f5f7fa;
             color: #333;
+        }
+
+        .login-screen {
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            background: linear-gradient(135deg, #1a1a2e 0%, #16213e 50%, #0f3460 100%);
+        }
+
+        .login-card {
+            background: white;
+            border-radius: 16px;
+            padding: 48px 40px;
+            text-align: center;
+            box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+            max-width: 420px;
+            width: 90%;
+        }
+
+        .login-logo {
+            font-size: 48px;
+            margin-bottom: 12px;
+        }
+
+        .login-title {
+            font-size: 24px;
+            font-weight: bold;
+            color: #1a1a2e;
+            margin-bottom: 8px;
+        }
+
+        .login-subtitle {
+            color: #666;
+            font-size: 14px;
+            margin-bottom: 32px;
+        }
+
+        .login-btn {
+            display: inline-flex;
+            align-items: center;
+            gap: 12px;
+            padding: 12px 32px;
+            border: 2px solid #e0e0e0;
+            border-radius: 8px;
+            background: white;
+            font-size: 16px;
+            font-weight: 500;
+            color: #333;
+            cursor: pointer;
+            transition: all 0.3s ease;
+        }
+
+        .login-btn:hover {
+            border-color: #4285f4;
+            box-shadow: 0 2px 8px rgba(66,133,244,0.2);
+        }
+
+        .login-btn img {
+            width: 24px;
+            height: 24px;
+        }
+
+        .login-error {
+            color: #e53935;
+            font-size: 14px;
+            margin-top: 16px;
+            padding: 8px 16px;
+            background: #ffeef0;
+            border-radius: 6px;
+        }
+
+        .login-info {
+            color: #999;
+            font-size: 12px;
+            margin-top: 24px;
+        }
+
+        .user-bar {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            float: right;
+            margin-top: -5px;
+        }
+
+        .user-avatar {
+            width: 32px;
+            height: 32px;
+            border-radius: 50%;
+        }
+
+        .user-name {
+            color: #ccc;
+            font-size: 14px;
+        }
+
+        .logout-btn {
+            padding: 4px 12px;
+            border: 1px solid rgba(255,255,255,0.3);
+            border-radius: 4px;
+            background: transparent;
+            color: #ccc;
+            font-size: 12px;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+
+        .logout-btn:hover {
+            background: rgba(255,255,255,0.1);
+            color: white;
         }
 
         .header {
@@ -989,8 +1101,127 @@
             });
         };
 
+        // ==================== AUTH GATE ====================
+        const GOOGLE_CLIENT_ID = '768263377217-sg98j6ktnvnq28hh0b4ak0vs3ajg005p.apps.googleusercontent.com';
+        const ALLOWED_DOMAIN = 'fandora.co';
+        const AUTH_STORAGE_KEY = 'fandora_auth_user';
+
+        const parseJwt = (token) => {
+            try {
+                const base64Url = token.split('.')[1];
+                const base64 = base64Url.replace(/-/g, '+').replace(/_/g, '/');
+                return JSON.parse(decodeURIComponent(atob(base64).split('').map(c =>
+                    '%' + ('00' + c.charCodeAt(0).toString(16)).slice(-2)
+                ).join('')));
+            } catch (e) { return null; }
+        };
+
+        const LoginScreen = ({ onLogin }) => {
+            const [error, setError] = useState(null);
+            const [loading, setLoading] = useState(false);
+            const btnRef = useRef(null);
+
+            useEffect(() => {
+                const initGsi = () => {
+                    if (!window.google?.accounts?.id) {
+                        setTimeout(initGsi, 300);
+                        return;
+                    }
+                    window.google.accounts.id.initialize({
+                        client_id: GOOGLE_CLIENT_ID,
+                        callback: (response) => {
+                            setLoading(true);
+                            setError(null);
+                            const payload = parseJwt(response.credential);
+                            if (!payload) {
+                                setError('登入驗證失敗，請重試');
+                                setLoading(false);
+                                return;
+                            }
+                            const email = payload.email || '';
+                            const domain = email.split('@')[1] || '';
+                            if (domain !== ALLOWED_DOMAIN) {
+                                setError(`僅限 @${ALLOWED_DOMAIN} 信箱登入（您的信箱: ${email}）`);
+                                setLoading(false);
+                                return;
+                            }
+                            const user = {
+                                name: payload.name || email,
+                                email: email,
+                                picture: payload.picture || '',
+                                exp: payload.exp
+                            };
+                            try { localStorage.setItem(AUTH_STORAGE_KEY, JSON.stringify(user)); } catch(e) {}
+                            onLogin(user);
+                        },
+                        auto_select: true,
+                    });
+                    if (btnRef.current) {
+                        window.google.accounts.id.renderButton(btnRef.current, {
+                            type: 'standard',
+                            theme: 'outline',
+                            size: 'large',
+                            text: 'signin_with',
+                            shape: 'rectangular',
+                            logo_alignment: 'left',
+                            width: 280,
+                        });
+                    }
+                    window.google.accounts.id.prompt();
+                };
+                initGsi();
+            }, []);
+
+            return React.createElement('div', { className: 'login-screen' },
+                React.createElement('div', { className: 'login-card' },
+                    React.createElement('div', { className: 'login-logo' }, '\uD83D\uDCCA'),
+                    React.createElement('h1', { className: 'login-title' }, 'Fandora \u4EBA\u5DE5\u6642\u7BA1\u7406\u7CFB\u7D71'),
+                    React.createElement('p', { className: 'login-subtitle' }, '\u8ACB\u4F7F\u7528 @fandora.co \u516C\u53F8\u4FE1\u7BB1\u767B\u5165'),
+                    React.createElement('div', {
+                        ref: btnRef,
+                        style: { display: 'flex', justifyContent: 'center', minHeight: 44 }
+                    }),
+                    loading && React.createElement('p', { style: { color: '#666', marginTop: 16 } }, '\u9A57\u8B49\u4E2D...'),
+                    error && React.createElement('div', { className: 'login-error' }, error),
+                    React.createElement('p', { className: 'login-info' }, '\u50C5\u9650 Fandora \u5718\u968A\u6210\u54E1\u4F7F\u7528')
+                )
+            );
+        };
+
+        const AppWithAuth = () => {
+            const [user, setUser] = useState(() => {
+                try {
+                    const saved = localStorage.getItem(AUTH_STORAGE_KEY);
+                    if (saved) {
+                        const u = JSON.parse(saved);
+                        // Check if token expired
+                        if (u.exp && u.exp * 1000 < Date.now()) {
+                            localStorage.removeItem(AUTH_STORAGE_KEY);
+                            return null;
+                        }
+                        return u;
+                    }
+                } catch(e) {}
+                return null;
+            });
+
+            const handleLogout = () => {
+                localStorage.removeItem(AUTH_STORAGE_KEY);
+                if (window.google?.accounts?.id) {
+                    window.google.accounts.id.disableAutoSelect();
+                }
+                setUser(null);
+            };
+
+            if (!user) {
+                return React.createElement(LoginScreen, { onLogin: setUser });
+            }
+
+            return React.createElement(FandoraDashboard, { authUser: user, onLogout: handleLogout });
+        };
+
         // Main Dashboard Component
-        const FandoraDashboard = () => {
+        const FandoraDashboard = ({ authUser, onLogout }) => {
             const [activeTab, setActiveTab] = useState('overview');
             const [workLogs, setWorkLogs] = useState([]);
             const [salaryData, setSalaryData] = useState([]);
@@ -1680,6 +1911,11 @@
                 <div>
                     <header className="header">
                         <div className="header-content">
+                            <div className="user-bar">
+                                {authUser && authUser.picture && <img src={authUser.picture} className="user-avatar" referrerPolicy="no-referrer" />}
+                                <span className="user-name">{authUser && authUser.name}</span>
+                                <button className="logout-btn" onClick={onLogout}>登出</button>
+                            </div>
                             <div className="header-title">Fandora</div>
                             <div className="header-subtitle">人工時管理系統</div>
                         </div>
@@ -2928,7 +3164,7 @@
         };
 
         // Render App
-        ReactDOM.createRoot(document.getElementById('root')).render(<FandoraDashboard />);
+        ReactDOM.createRoot(document.getElementById('root')).render(<AppWithAuth />);
     </script>
     <script type="module">
         import * as RechartsModule from 'https://esm.sh/recharts@2.12.7?external=react,react-dom';
