@@ -1687,7 +1687,8 @@
                 // Allocate monthly cost to projects proportionally by hours
                 const costs = {};
                 filteredLogs.forEach(log => {
-                    const ip = log.ipProject || '非授權IP';
+                    const ip = log.ipProject;
+                    if (!ip || ip === '非授權IP') return;
                     if (!costs[ip]) costs[ip] = { name: ip, cost: 0, hours: 0 };
                     costs[ip].hours += log.hours;
                     const mCost = monthlyCostMap[log.month] || 0;
@@ -1746,9 +1747,9 @@
                 return months;
             }, [workLogs]);
 
-            // Get all projects (ipProject/授權IP)
+            // Get all projects (ipProject/授權IP) — exclude 非授權IP
             const allProjects = useMemo(() => {
-                return _.uniq(filteredLogs.map(l => l.ipProject || '非授權IP')).sort();
+                return _.uniq(filteredLogs.map(l => l.ipProject).filter(p => p && p !== '非授權IP')).sort();
             }, [filteredLogs]);
 
             // Get all employees
@@ -1765,7 +1766,8 @@
             const projectHours = useMemo(() => {
                 const data = _.groupBy(filteredLogs, 'ipProject');
                 return Object.entries(data)
-                    .map(([name, logs]) => ({ name: name || '非授權IP', hours: _.sumBy(logs, 'hours') }))
+                    .filter(([name]) => name && name !== '非授權IP' && name !== 'undefined')
+                    .map(([name, logs]) => ({ name, hours: _.sumBy(logs, 'hours') }))
                     .sort((a, b) => b.hours - a.hours)
                     .slice(0, 10);
             }, [filteredLogs]);
@@ -1791,11 +1793,12 @@
                     .sort((a, b) => a.month.localeCompare(b.month));
             }, [filteredLogs]);
 
-            // Project analysis (ipProject/授權IP)
+            // Project analysis (ipProject/授權IP) — exclude 非授權IP
             const projectStats = useMemo(() => {
                 const projects = {};
                 filteredLogs.forEach(log => {
-                    const ip = log.ipProject || '非授權IP';
+                    const ip = log.ipProject;
+                    if (!ip || ip === '非授權IP') return;
                     if (!projects[ip]) {
                         projects[ip] = {
                             name: ip,
@@ -1951,7 +1954,7 @@
                 return months.map(m => {
                     const entry = { month: m };
                     top5.forEach(ip => {
-                        entry[ip] = _.sumBy(filteredLogs.filter(l => (l.ipProject || '非授權IP') === ip && l.month === m), 'hours');
+                        entry[ip] = _.sumBy(filteredLogs.filter(l => l.ipProject === ip && l.month === m), 'hours');
                     });
                     return entry;
                 });
