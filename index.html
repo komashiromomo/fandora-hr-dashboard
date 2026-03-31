@@ -999,19 +999,57 @@
             const [dateTo, setDateTo] = useState('');
             const [loading, setLoading] = useState(false);
             const [message, setMessage] = useState(null);
-            const [apiKey, setApiKey] = useState(localStorage.getItem('gdrive_api_key') || '');
-            const [folderId, setFolderId] = useState(localStorage.getItem('gdrive_folder_id') || '');
-            const [costSheetId, setCostSheetId] = useState(localStorage.getItem('gdrive_cost_sheet_id') || '');
+            const DEFAULT_API_KEY = 'AIzaSyA2yafCAMqILEEda1FUVFsGXd2utGr1_0Y';
+            const DEFAULT_FOLDER_ID = '1X5MnrR-2goU5Jo4bQlxaaxv7ESzyceCo';
+            const DEFAULT_COST_SHEET_ID = '13qiOx5PuVZb6fLtjio6FnP6lUunjwENOgCBe6UcgIQE';
+            const [apiKey, setApiKey] = useState(localStorage.getItem('gdrive_api_key') || DEFAULT_API_KEY);
+            const [folderId, setFolderId] = useState(localStorage.getItem('gdrive_folder_id') || DEFAULT_FOLDER_ID);
+            const [costSheetId, setCostSheetId] = useState(localStorage.getItem('gdrive_cost_sheet_id') || DEFAULT_COST_SHEET_ID);
             const [testingConnection, setTestingConnection] = useState(false);
             const [selectedProject, setSelectedProject] = useState('all');
             const [selectedWorkType, setSelectedWorkType] = useState('all');
             const [selectedEmployee, setSelectedEmployee] = useState('all');
             const [selectedDept, setSelectedDept] = useState('all');
 
-            // Auto-load data on mount
+            // Cache helpers: save/load data with daily expiry
+            const CACHE_KEY_WORK = 'fandora_cache_workLogs';
+            const CACHE_KEY_SALARY = 'fandora_cache_salaryData';
+            const CACHE_KEY_DATE = 'fandora_cache_date';
+
+            const getTodayStr = () => new Date().toISOString().substring(0, 10);
+
+            const saveToCache = (workData, salaryDataArr) => {
+                try {
+                    localStorage.setItem(CACHE_KEY_WORK, JSON.stringify(workData));
+                    localStorage.setItem(CACHE_KEY_SALARY, JSON.stringify(salaryDataArr));
+                    localStorage.setItem(CACHE_KEY_DATE, getTodayStr());
+                } catch (e) { console.warn('Cache save failed:', e); }
+            };
+
+            const loadFromCache = () => {
+                try {
+                    const cachedDate = localStorage.getItem(CACHE_KEY_DATE);
+                    if (cachedDate === getTodayStr()) {
+                        const w = JSON.parse(localStorage.getItem(CACHE_KEY_WORK) || '[]');
+                        const s = JSON.parse(localStorage.getItem(CACHE_KEY_SALARY) || '[]');
+                        if (w.length > 0) return { workLogs: w, salaryData: s };
+                    }
+                } catch (e) { console.warn('Cache load failed:', e); }
+                return null;
+            };
+
+            // Auto-load data on mount: use cache if today's data exists, otherwise fetch
             useEffect(() => {
                 if (apiKey && folderId) {
-                    loadDataFromGDrive();
+                    const cached = loadFromCache();
+                    if (cached) {
+                        setWorkLogs(cached.workLogs);
+                        setSalaryData(cached.salaryData);
+                        setMessage({ type: 'success', text: `已載入快取資料（${cached.workLogs.length} 筆工時、${cached.salaryData.length} 月費用）。按「重新載入」取得最新數據` });
+                        console.log(`📦 Cache hit: ${cached.workLogs.length} work records, ${cached.salaryData.length} salary records`);
+                    } else {
+                        loadDataFromGDrive();
+                    }
                 }
             }, []);
 
@@ -1078,6 +1116,7 @@
                     }
                     setWorkLogs(workLogsData);
                     setSalaryData(salariesData);
+                    saveToCache(workLogsData, salariesData);
                     setMessage({ type: 'success', text: `資料載入成功${salariesData.length > 0 ? `（含 ${salariesData.length} 月費用資料）` : ''}` });
                 } catch (error) {
                     setMessage({ type: 'error', text: `載入失敗: ${error.message}` });
